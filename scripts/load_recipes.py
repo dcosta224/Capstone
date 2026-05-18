@@ -5,7 +5,7 @@ Create the `recipe` schema and load Open Recipes + RecipeNLG into Supabase.
 Usage:
   pip install -r requirements.txt
   python scripts/load_recipes.py
-  python scripts/load_recipes.py --skip-nlg   # open_recipes only
+  python scripts/load_recipes.py --skip-nlg
 """
 
 from __future__ import annotations
@@ -49,6 +49,15 @@ OPEN_COLUMNS = [
 ]
 
 NLG_COLUMNS = ["id", "title", "ingredients", "directions", "link", "source", "ner"]
+COPY_SQL = (
+    "COPY recipe.recipe_nlg (id, title, ingredients, directions, link, source, ner) "
+    "FROM STDIN WITH (FORMAT csv, HEADER true, QUOTE '\"', ESCAPE '\"')"
+)
+
+
+def configure_session(cur) -> None:
+    cur.execute("SET statement_timeout = 0")
+    cur.execute("SET lock_timeout = 0")
 
 
 def oid(doc: dict) -> str:
@@ -87,11 +96,17 @@ def open_recipe_row(doc: dict) -> tuple:
 
 
 def parse_json_field(raw: str) -> str:
-    """Return JSON text for jsonb columns (already valid JSON in CSV)."""
     if not raw:
         return "[]"
     json.loads(raw)
     return raw
+
+
+def apply_schema_sql(cur, path: Path) -> None:
+    for stmt in path.read_text().split(";"):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            cur.execute(stmt)
 
 
 def load_open_recipes(cur, path: Path, batch_size: int = 5000) -> int:
@@ -120,108 +135,73 @@ def load_open_recipes(cur, path: Path, batch_size: int = 5000) -> int:
     return count
 
 
-def apply_schema_sql(cur, path: Path) -> None:
-    for stmt in path.read_text().split(";"):
-        stmt = stmt.strip()
-        if stmt and not stmt.startswith("--"):
-            cur.execute(stmt)
+def nlg_row_tuple(row: list[str]) -> list:
+    idx, title, ingredients, directions, link, source, ner = row
+    return [
+        idx,
+        title,
+        parse_json_field(ingredients),
+        parse_json_field(directions),
+        link,
+        source,
+        parse_json_field(ner),
+    ]
 
 
-def copy_recipe_nlg(cur, path: Path) -> int:
-    """Stage RecipeNLG to a temp CSV, then COPY (~2.2M rows)."""
-    copy_sql = (
-        "COPY recipe.recipe_nlg (id, title, ingredients, directions, link, source, ner) "
-        "FROM STDIN WITH (FORMAT csv, HEADER true, QUOTE '\"', ESCAPE '\"')"
-    )
-    count = 0
-    with path.open(newline="", encoding="utf-8") as src, tempfile.NamedTemporaryFile(
+def copy_chunk(cur, rows: list[list]) -> None:
+    with tempfile.NamedTemporaryFile(
         mode="w+", encoding="utf-8", newline="", suffix=".csv"
     ) as tmp:
-        reader = csv.reader(src)
+        writer = csv.writer(tmp)
+        writer.writerow(NLG_COLUMNS)
+        writer.writerows(rows)
+        tmp.flush()
+        tmp.seek(0)
+        cur.copy_expert(COPY_SQL, tmp)
+
+
+def load_recipe_nlg_chunked(
+    conn, path: Path, chunk_size: int = 75_000
+) -> int:
+    """COPY in chunks with a commit after each chunk (avoids Supabase timeouts)."""
+    total = 0
+    chunk: list[list] = []
+
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
         header = next(reader)
         assert header[1:] == ["title", "ingredients", "directions", "link", "source", "NER"]
 
-        writer = csv.writer(tmp)
-        writer.writerow(NLG_COLUMNS)
         for row in reader:
-            idx, title, ingredients, directions, link, source, ner = row
-            writer.writerow(
-                [
-                    idx,
-                    title,
-                    parse_json_field(ingredients),
-                    parse_json_field(directions),
-                    link,
-                    source,
-                    parse_json_field(ner),
-                ]
-            )
-            count += 1
-            if count % 200_000 == 0:
-                print(f"  recipe_nlg: staged {count:,} rows", end="\r", flush=True)
+            chunk.append(nlg_row_tuple(row))
+            if len(chunk) >= chunk_size:
+                with conn.cursor() as cur:
+                    configure_session(cur)
+                    copy_chunk(cur, chunk)
+                conn.commit()
+                total += len(chunk)
+                chunk.clear()
+                print(f"  recipe_nlg: {total:,} rows committed", flush=True)
 
-        tmp.flush()
-        tmp.seek(0)
-        cur.copy_expert(copy_sql, tmp)
-    print(f"  recipe_nlg: {count:,} rows loaded")
-    return count
+        if chunk:
+            with conn.cursor() as cur:
+                configure_session(cur)
+                copy_chunk(cur, chunk)
+            conn.commit()
+            total += len(chunk)
 
-
-def load_recipe_nlg_batched(cur, path: Path, batch_size: int = 10_000) -> int:
-    """Fallback batched insert if COPY hits memory limits."""
-    sql = (
-        f"INSERT INTO recipe.recipe_nlg ({', '.join(NLG_COLUMNS)}) VALUES %s "
-        "ON CONFLICT (id) DO NOTHING"
-    )
-    buf: list[tuple] = []
-    count = 0
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        next(reader)
-        for row in reader:
-            idx, title, ingredients, directions, link, source, ner = row
-            buf.append(
-                (
-                    int(idx),
-                    title,
-                    parse_json_field(ingredients),
-                    parse_json_field(directions),
-                    link,
-                    source,
-                    parse_json_field(ner),
-                )
-            )
-            if len(buf) >= batch_size:
-                psycopg2.extras.execute_values(
-                    cur,
-                    sql,
-                    buf,
-                    template="(%s, %s, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)",
-                    page_size=batch_size,
-                )
-                count += len(buf)
-                buf.clear()
-                print(f"  recipe_nlg: {count:,} rows", end="\r", flush=True)
-        if buf:
-            psycopg2.extras.execute_values(
-                cur,
-                sql,
-                buf,
-                template="(%s, %s, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb)",
-                page_size=len(buf),
-            )
-            count += len(buf)
-    print(f"  recipe_nlg: {count:,} rows loaded")
-    return count
+    print(f"  recipe_nlg: {total:,} rows loaded")
+    return total
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-nlg", action="store_true")
     parser.add_argument(
-        "--nlg-batch",
-        action="store_true",
-        help="Use batched INSERT instead of COPY for RecipeNLG",
+        "--chunk-size",
+        type=int,
+        default=75_000,
+        help="Rows per RecipeNLG COPY/commit (default 75000)",
     )
     args = parser.parse_args()
     load_dotenv()
@@ -233,23 +213,21 @@ def main() -> None:
 
     t0 = time.perf_counter()
     with connect() as conn:
-        conn.autocommit = False
         with conn.cursor() as cur:
+            configure_session(cur)
             print("Applying", SCHEMA_SQL)
             apply_schema_sql(cur, SCHEMA_SQL)
+            conn.commit()
 
             print("Loading open_recipes.json …")
-            n_open = load_open_recipes(cur, OPEN_RECIPES)
-
-            n_nlg = 0
-            if not args.skip_nlg:
-                print("Loading RecipeNLG.csv …")
-                if args.nlg_batch:
-                    n_nlg = load_recipe_nlg_batched(cur, RECIPE_NLG)
-                else:
-                    n_nlg = copy_recipe_nlg(cur, RECIPE_NLG)
-
+            load_open_recipes(cur, OPEN_RECIPES)
             conn.commit()
+
+        if not args.skip_nlg:
+            print("Loading RecipeNLG.csv (chunked COPY) …")
+            load_recipe_nlg_chunked(conn, RECIPE_NLG, chunk_size=args.chunk_size)
+
+        with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT 'open_recipe' AS tbl, COUNT(*)::bigint FROM recipe.open_recipe
