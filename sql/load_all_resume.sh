@@ -20,6 +20,7 @@ PG_DATABASE="${PG_DATABASE:-postgres}"
 PG_SSL_MODE="${PG_SSL_MODE:-require}"
 PG_PORT="${PG_POOL_SESSION_PORT:-5432}"
 export PGPASSWORD="$PG_PASSWORD"
+export PGOPTIONS="${PGOPTIONS:--c statement_timeout=0}"
 DATABASE_URL="postgresql://${PG_POOL_USER}@${PG_POOL_HOST}:${PG_PORT}/${PG_DATABASE}?sslmode=${PG_SSL_MODE}"
 
 echo "Fixing columns that allow empty CSV fields …"

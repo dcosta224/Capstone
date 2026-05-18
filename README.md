@@ -214,8 +214,8 @@ uv run python scripts/infer_schema.py --schema usda --out scripts/usda_schema_in
 Place files under `Data/` (not tracked in git):
 
 1. **USDA:** [FoodData Central download](https://fdc.nal.usda.gov/download-datasets) → “Full download of all data types” (April 2026) → unzip into `Data/All_Food_Data_April_2026/`.
-2. **Recipes:** `open_recipes.json` and `RecipeNLG.csv` under `Data/recipes/`.
-3. **Density:** `food_density.pdf` in `Data/` (or use the copy already there).
+2. **Recipes:** [Open-Recipes Repo](https://github.com/jakevdp/open-recipe-data/tree/main) `open_recipes.json` and [RecipeNLG Dataset](https://recipenlg.cs.put.poznan.pl/) `RecipeNLG.csv` under `Data/recipes/`.
+3. **Density:** [Density PDF](https://www.fao.org/4/ap815e/ap815e.pdf) `food_density.pdf` in `Data/` (or use the copy already there).
 
 ---
 
