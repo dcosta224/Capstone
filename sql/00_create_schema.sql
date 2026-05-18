@@ -49,7 +49,7 @@ CREATE TABLE food (
     data_type           text NOT NULL,
     description         text,
     food_category_id    text,
-    publication_date    date
+    publication_date    text
 );
 
 -- Type-specific extensions
@@ -61,16 +61,16 @@ CREATE TABLE branded_food (
     gtin_upc                        text,
     ingredients                     text,
     not_a_significant_source_of     text,
-    serving_size                    double precision,
+    serving_size                    text,
     serving_size_unit               text,
     household_serving_fulltext      text,
     branded_food_category           text,
     data_source                     text,
     package_weight                  text,
-    modified_date                   date,
-    available_date                  date,
+    modified_date                   text,
+    available_date                  text,
     market_country                  text,
-    discontinued_date               date,
+    discontinued_date               text,
     preparation_state_code          text,
     trade_channel                   text,
     short_description               text,
@@ -96,8 +96,8 @@ CREATE TABLE survey_fndds_food (
     fdc_id                  bigint PRIMARY KEY,
     food_code               text,
     wweia_category_code     text,
-    start_date              date,
-    end_date                date
+    start_date              text,
+    end_date                text
 );
 
 CREATE TABLE sub_sample_food (
@@ -169,13 +169,13 @@ CREATE TABLE input_food (
 CREATE TABLE market_acquisition (
     fdc_id                  bigint PRIMARY KEY,
     brand_description       text,
-    expiration_date         date,
+    expiration_date         text,
     label_weight            text,
     location                text,
-    acquisition_date        date,
+    acquisition_date        text,
     sales_type              text,
     sample_lot_nbr          text,
-    sell_by_date            date,
+    sell_by_date            text,
     store_city              text,
     store_name              text,
     store_state             text,
@@ -222,12 +222,12 @@ CREATE TABLE fndds_ingredient_nutrient_value (
     derivation_code             text,
     sr_addmod_year              text,
     foundation_year_acquired    text,
-    start_date                  date,
-    end_date                    date
+    start_date                  text,
+    end_date                    text
 );
 
 CREATE TABLE food_update_log_entry (
     id              bigint PRIMARY KEY,
     description     text,
-    last_updated    date
+    last_updated    text
 );
