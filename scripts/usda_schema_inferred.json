@@ -1,0 +1,1457 @@
+{
+  "schema": "usda",
+  "tables": [
+    "branded_food",
+    "fndds_ingredient_nutrient_value",
+    "food",
+    "food_category",
+    "food_component",
+    "food_nutrient",
+    "food_portion",
+    "food_protein_conversion_factor",
+    "food_update_log_entry",
+    "foundation_food",
+    "input_food",
+    "lab_method",
+    "lab_method_code",
+    "lab_method_nutrient",
+    "market_acquisition",
+    "measure_unit",
+    "microbe",
+    "nutrient",
+    "retention_factor",
+    "sample_food",
+    "sr_legacy_food",
+    "sub_sample_food",
+    "sub_sample_result",
+    "survey_fndds_food",
+    "wweia_food_category"
+  ],
+  "columns": {
+    "branded_food": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "brand_owner",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "brand_name",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "subbrand_name",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "gtin_upc",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "ingredients",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "not_a_significant_source_of",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "serving_size",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      },
+      {
+        "name": "serving_size_unit",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "household_serving_fulltext",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "branded_food_category",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "data_source",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "package_weight",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "modified_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "available_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "market_country",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "discontinued_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "preparation_state_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "trade_channel",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "short_description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "material_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "fndds_ingredient_nutrient_value": [
+      {
+        "name": "ingredient_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "ingredient_description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "nutrient_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "nutrient_value",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "nutrient_value_source",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "derivation_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "sr_addmod_year",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "foundation_year_acquired",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "start_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "end_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "food": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "data_type",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "food_category_id",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "publication_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "food_category": [
+      {
+        "name": "id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "code",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "description",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "food_component": [
+      {
+        "name": "id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "name",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "pct_weight",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "is_refuse",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "gram_weight",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      },
+      {
+        "name": "data_points",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "min_year_acquired",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "food_nutrient": [
+      {
+        "name": "id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "nutrient_id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "amount",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      },
+      {
+        "name": "data_points",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "derivation_id",
+        "data_type": "integer",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "min",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "max",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "median",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "loq",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "footnote",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "min_year_acquired",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "percent_daily_value",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "food_portion": [
+      {
+        "name": "id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "seq_num",
+        "data_type": "integer",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "amount",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      },
+      {
+        "name": "measure_unit_id",
+        "data_type": "integer",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "portion_description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "modifier",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "gram_weight",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      },
+      {
+        "name": "data_points",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "footnote",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "min_year_acquired",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "food_protein_conversion_factor": [
+      {
+        "name": "food_nutrient_conversion_factor_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "value",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      }
+    ],
+    "food_update_log_entry": [
+      {
+        "name": "id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "last_updated",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "foundation_food": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "ndb_number",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "footnote",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "input_food": [
+      {
+        "name": "id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "fdc_id_of_input_food",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "seq_num",
+        "data_type": "integer",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "amount",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      },
+      {
+        "name": "sr_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "sr_description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "unit",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "portion_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "portion_description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "gram_weight",
+        "data_type": "double precision",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 53
+      },
+      {
+        "name": "retention_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "lab_method": [
+      {
+        "name": "id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "technique",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "lab_method_code": [
+      {
+        "name": "lab_method_id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "code",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "lab_method_nutrient": [
+      {
+        "name": "lab_method_id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "nutrient_id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      }
+    ],
+    "market_acquisition": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "brand_description",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "expiration_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "label_weight",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "location",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "acquisition_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "sales_type",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "sample_lot_nbr",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "sell_by_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "store_city",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "store_name",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "store_state",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "upc_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "acquisition_number",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "measure_unit": [
+      {
+        "name": "id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "name",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "microbe": [
+      {
+        "name": "id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "food_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "method",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "microbe_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "min_value",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "max_value",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "uom",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "nutrient": [
+      {
+        "name": "id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "name",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "unit_name",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "nutrient_nbr",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "rank",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "retention_factor": [
+      {
+        "name": "gid",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "code",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "food_group_id",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "description",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "sample_food": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      }
+    ],
+    "sr_legacy_food": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "ndb_number",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "sub_sample_food": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "fdc_id_of_sample_food",
+        "data_type": "bigint",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 64
+      }
+    ],
+    "sub_sample_result": [
+      {
+        "name": "food_nutrient_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "adjusted_amount",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "lab_method_id",
+        "data_type": "integer",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "nutrient_name",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "survey_fndds_food": [
+      {
+        "name": "fdc_id",
+        "data_type": "bigint",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 64
+      },
+      {
+        "name": "food_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "wweia_category_code",
+        "data_type": "text",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "start_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      },
+      {
+        "name": "end_date",
+        "data_type": "date",
+        "nullable": true,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ],
+    "wweia_food_category": [
+      {
+        "name": "wweia_food_category",
+        "data_type": "integer",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": 32
+      },
+      {
+        "name": "wweia_food_category_description",
+        "data_type": "text",
+        "nullable": false,
+        "char_max_length": null,
+        "numeric_precision": null
+      }
+    ]
+  },
+  "primary_keys": {
+    "branded_food": [
+      "fdc_id"
+    ],
+    "food": [
+      "fdc_id"
+    ],
+    "food_category": [
+      "id"
+    ],
+    "food_component": [
+      "id"
+    ],
+    "food_nutrient": [
+      "id"
+    ],
+    "food_portion": [
+      "id"
+    ],
+    "food_protein_conversion_factor": [
+      "food_nutrient_conversion_factor_id"
+    ],
+    "food_update_log_entry": [
+      "id"
+    ],
+    "foundation_food": [
+      "fdc_id"
+    ],
+    "input_food": [
+      "id"
+    ],
+    "lab_method": [
+      "id"
+    ],
+    "lab_method_code": [
+      "lab_method_id",
+      "code"
+    ],
+    "lab_method_nutrient": [
+      "lab_method_id",
+      "nutrient_id"
+    ],
+    "market_acquisition": [
+      "fdc_id"
+    ],
+    "measure_unit": [
+      "id"
+    ],
+    "microbe": [
+      "id"
+    ],
+    "nutrient": [
+      "id"
+    ],
+    "retention_factor": [
+      "gid"
+    ],
+    "sample_food": [
+      "fdc_id"
+    ],
+    "sr_legacy_food": [
+      "fdc_id"
+    ],
+    "sub_sample_food": [
+      "fdc_id"
+    ],
+    "survey_fndds_food": [
+      "fdc_id"
+    ],
+    "wweia_food_category": [
+      "wweia_food_category"
+    ]
+  },
+  "foreign_keys": [],
+  "inferred_joins": [
+    {
+      "from_table": "branded_food",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "fndds_ingredient_nutrient_value",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "food",
+      "from_column": "food_category_id",
+      "to_table": "food_category",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "food.food_category_id is often a category label (text) for branded foods, not always food_category.id"
+    },
+    {
+      "from_table": "food_component",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "food_nutrient",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "food_nutrient",
+      "from_column": "nutrient_id",
+      "to_table": "nutrient",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "food_portion",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "food_portion",
+      "from_column": "measure_unit_id",
+      "to_table": "measure_unit",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "foundation_food",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "input_food",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "input_food",
+      "from_column": "fdc_id_of_input_food",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "lab_method_code",
+      "from_column": "lab_method_id",
+      "to_table": "lab_method",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "lab_method_nutrient",
+      "from_column": "lab_method_id",
+      "to_table": "lab_method",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "lab_method_nutrient",
+      "from_column": "nutrient_id",
+      "to_table": "nutrient",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "market_acquisition",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "microbe",
+      "from_column": "food_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "retention_factor",
+      "from_column": "food_group_id",
+      "to_table": "food_category",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "sample_food",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "sr_legacy_food",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "sub_sample_food",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "sub_sample_food",
+      "from_column": "fdc_id_of_sample_food",
+      "to_table": "sample_food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "sub_sample_result",
+      "from_column": "food_nutrient_id",
+      "to_table": "food_nutrient",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "sub_sample_result",
+      "from_column": "lab_method_id",
+      "to_table": "lab_method",
+      "to_column": "id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    },
+    {
+      "from_table": "survey_fndds_food",
+      "from_column": "fdc_id",
+      "to_table": "food",
+      "to_column": "fdc_id",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": "Extension table: one row per fdc_id (1:1 or 1:N)"
+    },
+    {
+      "from_table": "survey_fndds_food",
+      "from_column": "wweia_category_code",
+      "to_table": "wweia_food_category",
+      "to_column": "wweia_food_category",
+      "join_type": "LEFT",
+      "source": "named_convention",
+      "note": null
+    }
+  ],
+  "hub_summary": {
+    "hub_table": "food.fdc_id",
+    "satellite_tables_via_fdc_id": [
+      "branded_food",
+      "fndds_ingredient_nutrient_value",
+      "food_component",
+      "food_nutrient",
+      "food_portion",
+      "foundation_food",
+      "input_food",
+      "market_acquisition",
+      "microbe",
+      "sample_food",
+      "sr_legacy_food",
+      "sub_sample_food",
+      "survey_fndds_food"
+    ],
+    "all_tables": [
+      "branded_food",
+      "fndds_ingredient_nutrient_value",
+      "food",
+      "food_category",
+      "food_component",
+      "food_nutrient",
+      "food_portion",
+      "food_protein_conversion_factor",
+      "food_update_log_entry",
+      "foundation_food",
+      "input_food",
+      "lab_method",
+      "lab_method_code",
+      "lab_method_nutrient",
+      "market_acquisition",
+      "measure_unit",
+      "microbe",
+      "nutrient",
+      "retention_factor",
+      "sample_food",
+      "sr_legacy_food",
+      "sub_sample_food",
+      "sub_sample_result",
+      "survey_fndds_food",
+      "wweia_food_category"
+    ]
+  }
+}
