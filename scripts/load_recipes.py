@@ -160,11 +160,24 @@ def copy_chunk(cur, rows: list[list]) -> None:
         cur.copy_expert(COPY_SQL, tmp)
 
 
+def max_nlg_id(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(MAX(id), -1) FROM recipe.recipe_nlg")
+        return int(cur.fetchone()[0])
+
+
 def load_recipe_nlg_chunked(
-    conn, path: Path, chunk_size: int = 75_000
+    conn, path: Path, chunk_size: int = 50_000, resume_from: int | None = None
 ) -> int:
     """COPY in chunks with a commit after each chunk (avoids Supabase timeouts)."""
+    if resume_from is None:
+        skip_until = max_nlg_id(conn)
+    else:
+        skip_until = resume_from
     total = 0
+    if skip_until >= 0:
+        print(f"  recipe_nlg: resuming after id {skip_until}", flush=True)
+
     chunk: list[list] = []
 
     with path.open(newline="", encoding="utf-8") as f:
@@ -173,6 +186,8 @@ def load_recipe_nlg_chunked(
         assert header[1:] == ["title", "ingredients", "directions", "link", "source", "NER"]
 
         for row in reader:
+            if int(row[0]) <= skip_until:
+                continue
             chunk.append(nlg_row_tuple(row))
             if len(chunk) >= chunk_size:
                 with conn.cursor() as cur:
@@ -198,10 +213,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-nlg", action="store_true")
     parser.add_argument(
+        "--nlg-only",
+        action="store_true",
+        help="Resume RecipeNLG only (do not recreate schema or reload open_recipe)",
+    )
+    parser.add_argument(
         "--chunk-size",
         type=int,
-        default=75_000,
-        help="Rows per RecipeNLG COPY/commit (default 75000)",
+        default=50_000,
+        help="Rows per RecipeNLG COPY/commit (default 50000)",
     )
     args = parser.parse_args()
     load_dotenv()
@@ -213,15 +233,16 @@ def main() -> None:
 
     t0 = time.perf_counter()
     with connect() as conn:
-        with conn.cursor() as cur:
-            configure_session(cur)
-            print("Applying", SCHEMA_SQL)
-            apply_schema_sql(cur, SCHEMA_SQL)
-            conn.commit()
+        if not args.nlg_only:
+            with conn.cursor() as cur:
+                configure_session(cur)
+                print("Applying", SCHEMA_SQL)
+                apply_schema_sql(cur, SCHEMA_SQL)
+                conn.commit()
 
-            print("Loading open_recipes.json …")
-            load_open_recipes(cur, OPEN_RECIPES)
-            conn.commit()
+                print("Loading open_recipes.json …")
+                load_open_recipes(cur, OPEN_RECIPES)
+                conn.commit()
 
         if not args.skip_nlg:
             print("Loading RecipeNLG.csv (chunked COPY) …")

@@ -25,11 +25,11 @@ CREATE TABLE recipe.open_recipe (
 CREATE TABLE recipe.recipe_nlg (
     id                  bigint PRIMARY KEY,
     title               text NOT NULL,
-    ingredients         jsonb NOT NULL,
-    directions          jsonb NOT NULL,
+    ingredients         text NOT NULL,
+    directions          text NOT NULL,
     link                text,
     source              text,
-    ner                 jsonb NOT NULL
+    ner                 text NOT NULL
 );
 
 CREATE INDEX idx_open_recipe_source ON recipe.open_recipe (source);

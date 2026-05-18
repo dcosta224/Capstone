@@ -3,3 +3,5 @@
 .venv
 Data/
 *__pycache__/
+.cursor/
+.pip_packages/
