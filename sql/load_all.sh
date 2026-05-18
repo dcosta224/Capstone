@@ -34,6 +34,7 @@ else
 fi
 
 export PGPASSWORD="$PG_PASSWORD"
+export PGOPTIONS="${PGOPTIONS:--c statement_timeout=0}"
 DATABASE_URL="postgresql://${PG_POOL_USER}@${PG_POOL_HOST}:${PG_PORT}/${PG_DATABASE}?sslmode=${PG_SSL_MODE}"
 
 echo "Target: ${PG_POOL_USER}@${PG_POOL_HOST}:${PG_PORT}/${PG_DATABASE} (schema: usda)"
