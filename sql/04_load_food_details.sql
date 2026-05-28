@@ -4,7 +4,7 @@ SET search_path TO usda, public;
 
 \copy food_component FROM 'Data/All_Food_Data_April_2026/food_component.csv' WITH (FORMAT csv, HEADER true, QUOTE '"', ESCAPE '"')
 \copy food_portion FROM 'Data/All_Food_Data_April_2026/food_portion.csv' WITH (FORMAT csv, HEADER true, QUOTE '"', ESCAPE '"')
-\copy food_nutrient FROM 'Data/All_Food_Data_April_2026/food_nutrient.csv' WITH (FORMAT csv, HEADER true, QUOTE '"', ESCAPE '"')
+-- food_nutrient (~28M rows): loaded via scripts/load_food_nutrient_chunked.py (see load_all.sh)
 \copy food_protein_conversion_factor FROM 'Data/All_Food_Data_April_2026/food_protein_conversion_factor.csv' WITH (FORMAT csv, HEADER true, QUOTE '"', ESCAPE '"')
 \copy input_food FROM 'Data/All_Food_Data_April_2026/input_food.csv' WITH (FORMAT csv, HEADER true, QUOTE '"', ESCAPE '"')
 \copy market_acquisition FROM 'Data/All_Food_Data_April_2026/market_acquisition.csv' WITH (FORMAT csv, HEADER true, QUOTE '"', ESCAPE '"')

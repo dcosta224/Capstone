@@ -51,8 +51,12 @@ run_sql sql/01_load_reference.sql
 run_sql sql/02_load_food.sql
 run_sql sql/03_load_food_types.sql
 run_sql sql/04_load_food_details.sql
+echo "==> scripts/load_food_nutrient_chunked.py"
+uv run python scripts/load_food_nutrient_chunked.py
 run_sql sql/05_load_lab_and_fndds.sql
 run_sql sql/99_create_indexes.sql
+run_sql sql/08_create_food_nutrient_data.sql
+run_sql sql/06_create_food_mvp.sql
 
 echo "Done. Row counts:"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
