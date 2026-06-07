@@ -1,0 +1,29 @@
+{
+  "stages": [
+    {
+      "stage": "Non-branded foods",
+      "rule": "usda.food where data_type \u2260 branded_food",
+      "count": 101329,
+      "pct_of_non_branded": 100.0,
+      "pct_of_previous": 100.0,
+      "dropped_from_previous": 0
+    },
+    {
+      "stage": "Deduped by description",
+      "rule": "one row per normalized description (lowercased, punctuation stripped); latest publication_date wins",
+      "count": 24803,
+      "pct_of_non_branded": 24.48,
+      "pct_of_previous": 24.48,
+      "dropped_from_previous": 76526
+    },
+    {
+      "stage": "All 4 core macros",
+      "rule": "canonical deduped rows with nutrient_id 1003, 1004, 1005, and 1008 in food_nutrient",
+      "count": 13125,
+      "pct_of_non_branded": 12.95,
+      "pct_of_previous": 52.92,
+      "dropped_from_previous": 11678
+    }
+  ],
+  "source": "csv"
+}

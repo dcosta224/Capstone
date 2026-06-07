@@ -4,8 +4,10 @@
 --
 -- food_mvp: non-branded, any food_nutrient row, density-inferable portion (~7,700 full CSV load).
 --
--- food_4macro: same as food_4_portion_data but without the density-inferable portion
---   requirement (four core macros only).
+-- food_4macro: usda.food rows with all four core macros in food_nutrient
+--   (nutrient_id 1003 protein, 1004 fat, 1005 carbohydrate, 1008 energy),
+--   then one row per normalized description (latest publication_date wins).
+--   No portion, volume, branded/non-branded, or data_type filters.
 --
 -- food_4_portion_data: all data_type values with all four core macros
 --   (nutrient_id 1003 protein, 1004 fat, 1005 carbohydrate, 1008 energy)
@@ -162,32 +164,41 @@ COMMENT ON MATERIALIZED VIEW food_4_portion_data IS
 DROP MATERIALIZED VIEW IF EXISTS food_4macro;
 
 CREATE MATERIALIZED VIEW food_4macro AS
-WITH macro_pts AS (
-    SELECT
-        fdc_id,
-        COUNT(DISTINCT nutrient_id) AS n_macro_pts
-    FROM food_nutrient
-    WHERE nutrient_id IN (1003, 1004, 1005, 1008)  -- protein, fat, carb, energy
-    GROUP BY fdc_id
+WITH required_macros (nutrient_id) AS (
+    VALUES
+        (1003),  -- protein
+        (1004),  -- fat
+        (1005),  -- carbohydrate
+        (1008)   -- energy (calories)
+),
+-- fdc_ids in usda.food that have a food_nutrient row for every required macro.
+fdc_with_all_macros AS (
+    SELECT fn.fdc_id
+    FROM food_nutrient fn
+    INNER JOIN required_macros rm ON rm.nutrient_id = fn.nutrient_id
+    GROUP BY fn.fdc_id
+    HAVING COUNT(DISTINCT fn.nutrient_id) = (SELECT COUNT(*) FROM required_macros)
 ),
 eligible AS (
     SELECT f.*
     FROM food f
-    INNER JOIN macro_pts mp ON f.fdc_id = mp.fdc_id
-    WHERE mp.n_macro_pts = 4
+    INNER JOIN fdc_with_all_macros m ON m.fdc_id = f.fdc_id
 ),
+-- Same normalized name → keep the row with the latest publication_date (one survivor per name).
+-- Rows with blank descriptions are not deduped together (each keeps its own fdc_id key).
 deduped AS (
     SELECT
         e.*,
         ROW_NUMBER() OVER (
-            PARTITION BY normalize_food_description(e.description)
+            PARTITION BY COALESCE(
+                NULLIF(normalize_food_description(e.description), ''),
+                'fdc_id:' || e.fdc_id::text
+            )
             ORDER BY
-                CASE WHEN e.data_type = 'foundation_food' THEN 0 ELSE 1 END,
                 e.publication_date DESC NULLS LAST,
                 e.fdc_id DESC
         ) AS dedupe_rank
     FROM eligible e
-    WHERE normalize_food_description(e.description) <> ''
 )
 SELECT
     fdc_id,
@@ -201,9 +212,9 @@ WHERE dedupe_rank = 1;
 CREATE UNIQUE INDEX food_4macro_fdc_id_idx ON food_4macro (fdc_id);
 
 COMMENT ON MATERIALIZED VIEW food_4macro IS
-    'Foods with protein (1003), fat (1004), carbohydrate (1005), and energy (1008), '
-    'deduped by normalize_food_description (no portion requirement). '
-    'Same canonical row rule as food_4_portion_data.';
+    'usda.food rows with protein (1003), fat (1004), carbohydrate (1005), and energy (1008) '
+    'in food_nutrient. Deduped by normalize_food_description; canonical row = latest publication_date '
+    '(one row per name group). No portion, volume, or data_type filters.';
 
 COMMENT ON FUNCTION normalize_food_description(text) IS
     'Normalized food description for dedup/matching (see ingredient_match.normalize_text).';

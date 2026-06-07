@@ -1,0 +1,19 @@
+{
+  "model_name": "all-MiniLM-L6-v2",
+  "embedding_dim": 384,
+  "food_4macro": {
+    "n_rows": 96996,
+    "name_shape": [
+      96996,
+      384
+    ],
+    "prep_shape": [
+      96996,
+      384
+    ],
+    "dequant_shape": [
+      96996,
+      384
+    ]
+  }
+}

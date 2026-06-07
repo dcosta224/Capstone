@@ -6,4 +6,13 @@ Data/
 .cursor/
 .pip_packages/
 
+# MLflow local tracking + artifact stores
+mlruns/
+mlartifacts/
+mlflow.db
+
+*.csv
+*.txt
+*.png
+
 .DS_Store

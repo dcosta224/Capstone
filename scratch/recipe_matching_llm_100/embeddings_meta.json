@@ -1,0 +1,21 @@
+{
+  "model_name": "all-MiniLM-L6-v2",
+  "embedding_dim": 384,
+  "recipe": {
+    "n_rows": 840,
+    "name_shape": [
+      840,
+      384
+    ],
+    "prep_shape": [
+      840,
+      384
+    ],
+    "dequant_shape": [
+      840,
+      384
+    ],
+    "unprepared_prep_proxy_n": 621,
+    "unprepared_prep_text": "unprepared"
+  }
+}
