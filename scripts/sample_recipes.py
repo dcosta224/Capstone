@@ -19,6 +19,15 @@ from ingredient_query_cache import _parse_ingredient_list
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RECIPE_CSV = ROOT / "Data" / "recipes" / "RecipeNLG.csv"
+DEFAULT_MVP_MANIFEST = ROOT / "Data" / "recipes" / "mvp_sample_1000.json"
+
+
+def load_recipe_ids_from_manifest(manifest_path: Path) -> list[int]:
+    """Load recipe_ids from a diversity-sample or legacy sampled_recipe_ids JSON."""
+    data = json.loads(manifest_path.read_text())
+    if "recipe_ids" in data:
+        return [int(x) for x in data["recipe_ids"]]
+    raise ValueError(f"Manifest missing 'recipe_ids': {manifest_path}")
 
 
 def sample_recipe_ids(
@@ -81,13 +90,19 @@ def load_sampled_recipes(
     seed: int = 42,
     recipe_csv: Path = DEFAULT_RECIPE_CSV,
     ids_path: Path | None = None,
+    sample_manifest: Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
     """Return (recipes, exploded_ingredients, sampled_ids).
 
-    If `ids_path` exists, reuse the persisted sample for reproducibility;
-    otherwise draw a fresh sample and persist it there.
+    If `sample_manifest` is set, load recipe_ids from that JSON (diversity MVP
+    sample or any manifest with a ``recipe_ids`` list).
+
+    Otherwise, if `ids_path` exists, reuse the persisted random sample;
+    else draw a fresh uniform random sample and persist it to `ids_path`.
     """
-    if ids_path is not None and ids_path.is_file():
+    if sample_manifest is not None:
+        sampled_ids = load_recipe_ids_from_manifest(sample_manifest)
+    elif ids_path is not None and ids_path.is_file():
         sampled_ids = json.loads(ids_path.read_text())["recipe_ids"]
     else:
         sampled_ids = sample_recipe_ids(n=n, seed=seed, recipe_csv=recipe_csv)

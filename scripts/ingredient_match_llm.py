@@ -58,7 +58,7 @@ from load_food_4macro import load_food_4macro
 from progress_utils import iter_progress
 from recipe_directions import parse_directions_list, relevant_direction_steps
 from recipe_match_summary import summarize_recipe_matches
-from sample_recipes import load_sampled_recipes
+from sample_recipes import DEFAULT_MVP_MANIFEST, load_sampled_recipes
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LLM_WORK_DIR = ROOT / "scratch" / "recipe_matching_llm_100"
@@ -877,7 +877,8 @@ def run_pilot(
     use_supabase: bool,
     use_mlflow: bool,
     mlflow_experiment: str,
-    run_id: str | None,
+    sample_manifest: Path | None = None,
+    run_id: str | None = None,
     chunk_size: int = 256,
     log_every: int = 25,
     heartbeat_sec: float = 15.0,
@@ -898,10 +899,17 @@ def run_pilot(
         print(f"\n--- {label} ---", flush=True)
         return time.perf_counter()
 
-    t = phase(f"Sampling {n_recipes} recipes (seed={seed}) from full RecipeNLG")
-    ids_path = work_dir / "sampled_recipe_ids.json"
+    t = phase(
+        f"Loading {n_recipes} recipes from manifest {sample_manifest}"
+        if sample_manifest is not None
+        else f"Sampling {n_recipes} recipes (seed={seed}) from full RecipeNLG"
+    )
+    ids_path = None if sample_manifest is not None else work_dir / "sampled_recipe_ids.json"
     recipes, recipe_ingredients, sampled_ids = load_sampled_recipes(
-        n=n_recipes, seed=seed, ids_path=ids_path
+        n=n_recipes,
+        seed=seed,
+        ids_path=ids_path,
+        sample_manifest=sample_manifest,
     )
     print(f"Loaded {len(recipes)} recipes -> {len(recipe_ingredients):,} ingredient lines "
           f"({time.perf_counter() - t:.1f}s)", flush=True)
@@ -1092,6 +1100,15 @@ def main() -> None:
         default=MLFLOW_EXPERIMENT,
         help=f"MLflow experiment name (default: {MLFLOW_EXPERIMENT}). Each execution logs one run.",
     )
+    parser.add_argument(
+        "--sample-manifest",
+        type=Path,
+        default=None,
+        help=(
+            f"JSON manifest with recipe_ids (e.g. diversity MVP sample). "
+            f"Default MVP path when set without value: {DEFAULT_MVP_MANIFEST.name} under Data/recipes/."
+        ),
+    )
     parser.add_argument("--max-candidates", type=int, default=None)
     parser.add_argument("--semantic-floor", type=float, default=None)
     parser.add_argument("--lexical-floor", type=float, default=None)
@@ -1127,6 +1144,7 @@ def main() -> None:
         concurrency=args.concurrency, flush_every=args.flush_every, limit=args.limit,
         use_supabase=not args.no_supabase, use_mlflow=not args.no_mlflow,
         mlflow_experiment=args.mlflow_experiment,
+        sample_manifest=args.sample_manifest,
         run_id=args.run_id, chunk_size=args.chunk_size, log_every=args.log_every,
         heartbeat_sec=args.heartbeat_sec, verbose=not args.quiet,
         budget_config=budget_config,
