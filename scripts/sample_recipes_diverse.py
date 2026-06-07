@@ -34,6 +34,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db import connect, load_dotenv
+from progress_utils import iter_progress, progress_enabled_for_count
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EMBED_DIR = ROOT / "Data" / "recipes" / "embeddings"
@@ -91,9 +92,10 @@ def run_kmeans(
         max_iter=max_iter,
         n_init=3,
         reassignment_ratio=0.01,
-        verbose=0,
+        verbose=1,
     )
-    labels = km.fit_predict(np.asarray(embeddings, dtype=np.float32))
+    # Pass memmap directly — avoid copying ~n×d float32 into RAM.
+    labels = km.fit_predict(embeddings)
     centroids = km.cluster_centers_.astype(np.float32)
     centroids = _normalize_rows(centroids)
     elapsed = time.perf_counter() - t0
@@ -112,14 +114,28 @@ def compute_medoids(
 ) -> pd.DataFrame:
     """One medoid row per non-empty cluster."""
     rng = np.random.default_rng(seed)
-    rows: list[dict] = []
     n_clusters = centroids.shape[0]
+    cluster_sizes = np.bincount(labels, minlength=n_clusters)
 
-    for cid in range(n_clusters):
-        member_idx = np.flatnonzero(labels == cid)
-        if member_idx.size == 0:
-            continue
+    # Single argsort groups all points by cluster — O(n log n) vs O(k·n) scans.
+    order = np.argsort(labels, kind="mergesort")
+    sorted_labels = labels[order]
+    split_at = np.flatnonzero(np.diff(sorted_labels)) + 1
+    chunk_starts = np.concatenate(([0], split_at))
+    chunk_ends = np.concatenate((split_at, [len(labels)]))
+    active_cids = sorted_labels[chunk_starts]
 
+    rows: list[dict] = []
+    show_progress = progress_enabled_for_count(len(active_cids), threshold=100)
+    for i, cid in iter_progress(
+        range(len(active_cids)),
+        total=len(active_cids),
+        desc="Medoids",
+        enabled=show_progress,
+        unit="cluster",
+    ):
+        cid = int(active_cids[i])
+        member_idx = order[chunk_starts[i] : chunk_ends[i]]
         if member_idx.size > medoid_max_members:
             member_idx = rng.choice(member_idx, size=medoid_max_members, replace=False)
 
@@ -132,8 +148,8 @@ def compute_medoids(
         rows.append(
             {
                 "recipe_id": int(recipe_ids[best_idx]),
-                "cluster_id": int(cid),
-                "cluster_size": int(np.sum(labels == cid)),
+                "cluster_id": cid,
+                "cluster_size": int(cluster_sizes[cid]),
                 "medoid_score": round(float(sims[best_local]), 6),
                 "embed_idx": best_idx,
             }
@@ -154,6 +170,8 @@ def _mmr_select(
     n_pick: int,
     lam: float,
     rng: np.random.Generator,
+    *,
+    show_progress: bool = False,
 ) -> list[int]:
     """Greedy MMR on row indices into candidate_emb."""
     n = len(candidate_emb)
@@ -167,8 +185,16 @@ def _mmr_select(
     selected = [first]
     selected_emb = candidate_emb[first : first + 1]
 
-    while len(selected) < n_pick:
-        sims = _cosine_sim(candidate_emb, selected_emb)  # (n, |sel|)
+    progress = iter_progress(
+        range(n_pick - 1),
+        total=max(n_pick - 1, 0),
+        desc="MMR fill",
+        enabled=show_progress and n_pick > 20,
+    )
+    for _ in progress:
+        if len(selected) >= n_pick:
+            break
+        sims = _cosine_sim(candidate_emb, selected_emb)
         max_sim = sims.max(axis=1)
         min_dist = 1.0 - max_sim
         mmr = lam * min_dist - (1.0 - lam) * max_sim
@@ -286,7 +312,9 @@ def select_final_sample(
         if selector == "facility_location":
             local_sel = _facility_location_select(cand_emb, fill_n, rng)
         else:
-            local_sel = _mmr_select(cand_emb, fill_n, mmr_lambda, rng)
+            local_sel = _mmr_select(
+                cand_emb, fill_n, mmr_lambda, rng, show_progress=True
+            )
         _append(remain.iloc[local_sel], "mmr" if selector == "mmr" else "facility_location")
 
     out = pd.DataFrame(picks)
@@ -477,6 +505,7 @@ def run_pipeline(
     n = len(recipe_ids)
     manifest = json.loads((embed_dir / "manifest.json").read_text())
     k_target = effective_n_clusters(n_clusters, n)
+    print(f"Loaded {n:,} embeddings (dims={manifest.get('dims')})", flush=True)
 
     cached = None if force_cluster else load_cluster_cache(cluster_dir, n_clusters, n)
     if cached is not None:
@@ -484,6 +513,8 @@ def run_pipeline(
     else:
         if force_cluster:
             print(f"Reclustering (--force-cluster): k={k_target:,}, n={n:,}", flush=True)
+        else:
+            print(f"Clustering: k={k_target:,}, n={n:,}", flush=True)
         labels, centroids = run_kmeans(
             embeddings,
             n_clusters=n_clusters,
@@ -502,6 +533,7 @@ def run_pipeline(
         save_cluster_cache(cluster_dir, k_target, labels, centroids, medoids)
 
     k_eff = centroids.shape[0]
+    print("Selecting final sample…", flush=True)
     selected = select_final_sample(
         medoids,
         embeddings,
