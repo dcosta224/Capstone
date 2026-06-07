@@ -20,6 +20,7 @@ experiment (default `ingredient_match_llm`; override with `--mlflow-experiment`)
 
 Run:
     uv run python scripts/ingredient_match_llm.py --n-recipes 100 --seed 42
+    uv run python scripts/ingredient_match_llm.py --sample-manifest Data/recipes/mvp_sample_1000.json
 """
 
 from __future__ import annotations

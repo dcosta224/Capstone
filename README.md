@@ -15,6 +15,8 @@ Capstone/
 │   ├── db.py                      # Shared Supabase connection from .env
 │   ├── infer_schema.py            # Introspect usda schema + infer joins
 │   ├── load_recipes.py            # recipe schema (Open Recipes + RecipeNLG)
+│   ├── load_recipe_embeddings.py  # MiniLM vectors → recipe.recipe_nlg_embedding
+│   ├── dedupe_recipe_nlg.py       # Kadin hybrid dedup (DELETE duplicates)
 │   └── load_food_density.py       # PDF → CSV → conversions schema
 ├── sql/                           # DDL and psql-based USDA bulk load
 │   ├── 00_create_schema.sql …     # usda tables + COPY scripts
@@ -175,7 +177,28 @@ uv run python scripts/load_recipes.py --extract-only   # not applicable (JSON/CS
 uv run python scripts/load_recipes.py --nlg-only       # resume RecipeNLG after partial load
 ```
 
-### 3. Food density / conversions (Python)
+### 3. Recipe embeddings (Python)
+
+Streams local `Data/recipes/RecipeNLG.csv` in chunks (does not load 2.2M rows from Supabase). Uploads only ids present in `recipe.recipe_nlg`. Enable **pgvector** first.
+
+```bash
+uv run python scripts/load_recipe_embeddings.py --limit 5000   # smoke test
+uv run python scripts/load_recipe_embeddings.py                  # full CSV → DB
+```
+
+### 4. Recipe deduplication (Python)
+
+Kadin's hybrid pipeline from `exploration.ipynb`. **Dry-run first**, then delete:
+
+```bash
+uv run python scripts/dedupe_recipe_nlg.py --dry-run
+uv run python scripts/dedupe_recipe_nlg.py --limit 10000 --dry-run
+uv run python scripts/dedupe_recipe_nlg.py --execute
+```
+
+Phase 1 removes exact duplicates (same title + ingredients + directions). Phase 2 uses MiniLM/FAISS/hybrid scoring and keeps one recipe per cluster (most ingredients, then longest directions). Manifests: `Data/dedup/`. Use `--use-db-embeddings` if vectors are already loaded.
+
+### 5. Food density / conversions (Python)
 
 ```bash
 uv run python scripts/load_food_density.py           # PDF → CSV → DB
@@ -185,7 +208,7 @@ uv run python scripts/load_food_density.py --load-only
 
 CSV output: `Data/conversions/food_density.csv`.
 
-### 4. Schema introspection
+### 6. Schema introspection
 
 ```bash
 uv run python scripts/infer_schema.py

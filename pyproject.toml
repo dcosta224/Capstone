@@ -24,4 +24,5 @@ dependencies = [
     "pyarrow>=19.0.0",
     "tqdm>=4.67.0",
     "mlflow>=3",
+    "networkx>=3.6.1",
 ]

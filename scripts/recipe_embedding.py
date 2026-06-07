@@ -88,8 +88,8 @@ def build_semantic_text(title_clean: str, ingredients_clean: Iterable[str]) -> s
     return f"{title_clean} | {tokens}".strip()
 
 
-def prepare_recipe_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Return deduplicated rows with id, title_clean, semantic_text, ingredient_count."""
+def build_recipe_features(df: pd.DataFrame, *, dedup: bool = False) -> pd.DataFrame:
+    """Build feature rows from raw recipe records (id, title, ingredients, directions)."""
     required = {"id", "title", "ingredients", "directions"}
     missing = required - set(df.columns)
     if missing:
@@ -98,9 +98,13 @@ def prepare_recipe_features(df: pd.DataFrame) -> pd.DataFrame:
     work = df.loc[:, ["id", "title", "ingredients", "directions"]].copy()
     work["id"] = work["id"].astype("int64")
     work["title"] = work["title"].astype(str)
-    work["ingredients"] = work["ingredients"].map(canonical_json_field)
-    work["directions"] = work["directions"].map(canonical_json_field)
-    work = work.drop_duplicates(subset=["title", "ingredients", "directions"], keep="first")
+    if dedup:
+        work["ingredients"] = work["ingredients"].map(canonical_json_field)
+        work["directions"] = work["directions"].map(canonical_json_field)
+        work = work.drop_duplicates(
+            subset=["title", "ingredients", "directions"],
+            keep="first",
+        )
 
     work["title_clean"] = work["title"].map(normalize_text)
     work["ingredients_clean"] = work["ingredients"].map(clean_ingredients)
@@ -114,6 +118,11 @@ def prepare_recipe_features(df: pd.DataFrame) -> pd.DataFrame:
         :,
         ["id", "title_clean", "semantic_text", "ingredient_count"],
     ].reset_index(drop=True)
+
+
+def prepare_recipe_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Return deduplicated rows with id, title_clean, semantic_text, ingredient_count."""
+    return build_recipe_features(df, dedup=True)
 
 
 def vector_literal(values: Iterable[float]) -> str:

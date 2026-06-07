@@ -14,6 +14,9 @@ Usage:
   uv run python scripts/sample_recipes_diverse.py
   uv run python scripts/sample_recipes_diverse.py --n-clusters 500 --n-sample 100 \\
       --embed-dir Data/recipes/embeddings   # smoke test on partial load
+
+Reuses cached cluster labels/medoids when a complete k{N} cache exists for the
+requested cluster count (and embedding count). Pass --force-cluster to recompute.
 """
 
 from __future__ import annotations
@@ -386,6 +389,11 @@ def build_report(
     }
 
 
+def effective_n_clusters(n_clusters: int, n_embeddings: int) -> int:
+    """Cluster count after capping to the number of available embeddings."""
+    return min(n_clusters, n_embeddings)
+
+
 def save_cluster_cache(
     cluster_dir: Path,
     n_clusters: int,
@@ -404,18 +412,46 @@ def save_cluster_cache(
 def load_cluster_cache(
     cluster_dir: Path,
     n_clusters: int,
+    n_embeddings: int,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame] | None:
-    prefix = cluster_dir / f"k{n_clusters}"
+    """Load cached clustering artifacts when complete for the requested k and corpus size."""
+    k = effective_n_clusters(n_clusters, n_embeddings)
+    prefix = cluster_dir / f"k{k}"
     labels_path = Path(f"{prefix}_labels.npy")
     centroids_path = Path(f"{prefix}_centroids.npy")
     medoids_path = Path(f"{prefix}_medoids.parquet")
-    if labels_path.is_file() and centroids_path.is_file() and medoids_path.is_file():
-        labels = np.load(labels_path)
-        centroids = np.load(centroids_path)
-        medoids = pd.read_parquet(medoids_path)
-        print(f"Loaded cached clusters from {cluster_dir}", flush=True)
-        return labels, centroids, medoids
-    return None
+    if not (labels_path.is_file() and centroids_path.is_file() and medoids_path.is_file()):
+        return None
+
+    labels = np.load(labels_path)
+    centroids = np.load(centroids_path)
+    medoids = pd.read_parquet(medoids_path)
+
+    if centroids.shape[0] != k:
+        print(
+            f"Cluster cache incomplete: centroids have {centroids.shape[0]} rows, expected {k}",
+            flush=True,
+        )
+        return None
+    if len(labels) != n_embeddings:
+        print(
+            f"Cluster cache incomplete: labels length {len(labels):,} != "
+            f"{n_embeddings:,} embeddings (re-export or --force-cluster)",
+            flush=True,
+        )
+        return None
+    if labels.max(initial=-1) >= k:
+        print(
+            f"Cluster cache incomplete: label max {labels.max()} >= k={k}",
+            flush=True,
+        )
+        return None
+    if len(medoids) == 0 or medoids["cluster_id"].nunique() > k:
+        print("Cluster cache incomplete: medoid table missing or inconsistent", flush=True)
+        return None
+
+    print(f"Using cached clusters k={k:,} from {cluster_dir}", flush=True)
+    return labels, centroids, medoids
 
 
 def run_pipeline(
@@ -435,16 +471,19 @@ def run_pipeline(
     kmeans_batch_size: int,
     kmeans_max_iter: int,
     medoid_max_members: int,
-    skip_cluster: bool,
+    force_cluster: bool,
 ) -> dict:
     recipe_ids, embeddings = load_embedding_artifacts(embed_dir)
     n = len(recipe_ids)
     manifest = json.loads((embed_dir / "manifest.json").read_text())
+    k_target = effective_n_clusters(n_clusters, n)
 
-    cached = load_cluster_cache(cluster_dir, n_clusters) if skip_cluster else None
+    cached = None if force_cluster else load_cluster_cache(cluster_dir, n_clusters, n)
     if cached is not None:
         labels, centroids, medoids = cached
     else:
+        if force_cluster:
+            print(f"Reclustering (--force-cluster): k={k_target:,}, n={n:,}", flush=True)
         labels, centroids = run_kmeans(
             embeddings,
             n_clusters=n_clusters,
@@ -460,7 +499,7 @@ def run_pipeline(
             medoid_max_members=medoid_max_members,
             seed=seed,
         )
-        save_cluster_cache(cluster_dir, centroids.shape[0], labels, centroids, medoids)
+        save_cluster_cache(cluster_dir, k_target, labels, centroids, medoids)
 
     k_eff = centroids.shape[0]
     selected = select_final_sample(
@@ -534,8 +573,11 @@ def main() -> None:
     parser.add_argument("--kmeans-max-iter", type=int, default=100)
     parser.add_argument("--medoid-max-members", type=int, default=5000,
                         help="Subsample large clusters when scoring medoids.")
-    parser.add_argument("--skip-cluster", action="store_true",
-                        help="Reuse cached cluster labels/medoids if present.")
+    parser.add_argument(
+        "--force-cluster",
+        action="store_true",
+        help="Ignore cached cluster labels/medoids and rerun k-means + medoids.",
+    )
     args = parser.parse_args()
 
     if args.rare_quota + args.proportional_quota > args.n_sample:
@@ -557,7 +599,7 @@ def main() -> None:
         kmeans_batch_size=args.kmeans_batch_size,
         kmeans_max_iter=args.kmeans_max_iter,
         medoid_max_members=args.medoid_max_members,
-        skip_cluster=args.skip_cluster,
+        force_cluster=args.force_cluster,
     )
 
 
