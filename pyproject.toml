@@ -5,11 +5,18 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cvxpy>=1.6.0",
+    "fastapi>=0.115.0",
     "ipykernel>=7.2.0",
     "matplotlib>=3.10.9",
     "matplotlib-inline>=0.2.2",
     "numpy>=2.4.5",
+    "openai>=1.40.0",
     "pandas>=3.0.3",
     "pdfplumber>=0.11.9",
+    "pgvector>=0.3.0",
     "psycopg2-binary>=2.9.12",
+    "pytest>=8.0.0",
+    "sentence-transformers>=3.0.0",
+    "uvicorn[standard]>=0.32.0",
 ]

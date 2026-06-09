@@ -219,6 +219,83 @@ Place files under `Data/` (not tracked in git):
 
 ---
 
+## MVP: load resolved recipes + nutrients (Supabase)
+
+After a v4 feasibility run (`scratch/EDA/portion_feasibility_1000_v4_no_portion/pipeline_matches.parquet`), load the **106 fully-resolved recipes** into Supabase:
+
+```bash
+# 1. Per-ingredient fdc_id + gram_weight (+ portion_id where applicable)
+uv run python scripts/load_resolved_recipes.py --dry-run
+uv run python scripts/load_resolved_recipes.py --execute
+
+# 2. Per-recipe nutrient totals (wide table; amounts scaled from per-100g USDA values)
+uv run python scripts/load_recipe_nutrients.py --dry-run
+uv run python scripts/load_recipe_nutrients.py --execute
+```
+
+| Table | Rows (expected) | Contents |
+|-------|-----------------|----------|
+| `recipe.resolved_recipes` | ~634 | One row per ingredient line |
+| `recipe.recipe_nutrients` | 106 | One row per recipe; columns like `energy_kcal`, `protein_g`, … |
+
+DDL: [`sql/11_create_resolved_recipes.sql`](sql/11_create_resolved_recipes.sql). Nutrient table schema is generated from `usda.nutrient` at load time.
+
+EDA: [`scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb`](scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb)
+
+---
+
+## MVP recipe recommendation (local web app)
+
+Ranks the **106 fully-resolved recipes** by semantic similarity (MiniLM) and PFC calorie-fraction fit, optimizes portions on the top 10 via convex SCA (PFC gram targets at the **midpoint kcal** of your calorie range, with total kcal fixed at that midpoint), then uses an LLM judge for the final pick. The UI streams pipeline progress in real time over SSE.
+
+### Prerequisites
+
+- Supabase tables populated: `recipe.resolved_recipes`, `recipe.recipe_nutrients`, `recipe.recipe_nlg_features`, `recipe.recipe_nlg_embedding`
+- `.env` with Postgres pool vars (see above)
+- `OPENAI_API_KEY` for LLM judge (falls back to deterministic mock if unset)
+- `HF_TOKEN` optional (Hugging Face model download cache)
+
+Apply debug-log schema (optional, also auto-created on first run):
+
+```bash
+psql "$DATABASE_URL" -f sql/13_create_mvp_logs_schema.sql
+```
+
+### Run locally
+
+```bash
+uv sync
+# Optional: pre-build disk cache (faster first request; uses local embeddings export if present)
+uv run python scripts/warm_mvp_cache.py
+
+uv run uvicorn mvp_web.server:app --reload --port 8000
+```
+
+On startup the server **warms the in-memory cache** (106 recipes, embeddings, ingredients, USDA nutrients) from `mvp_web/cache/mvp_corpus.pkl` or Supabase. Subsequent demo queries skip corpus DB loads.
+
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Submit taste text plus calorie and PFC % ranges. The UI streams pipeline stages (ranking → optimizer → judge) and shows the structured recipe with USDA descriptions, portion labels, and optimized quantities.
+
+### Tests
+
+```bash
+uv run pytest tests/ -v
+```
+
+### Key modules
+
+| Path | Role |
+|------|------|
+| `scripts/recipe_macro_optimizer.py` | Log-ratio portion optimizer (CVXPY + SCA) |
+| `scripts/mvp_nutrient_fit.py` | PFC calorie-fraction range distance |
+| `scripts/mvp_recipe_ranker.py` | Stage-1 combined ranking |
+| `scripts/mvp_pipeline.py` | Full orchestrator + SSE events |
+| `scripts/mvp_recipe_judge.py` | LLM final selection |
+| `mvp_web/server.py` | FastAPI + SSE endpoint |
+
+Pipeline runs are logged to `mvp_logs.query_runs` and `mvp_logs.stage_events` when Supabase is reachable.
+
+---
+
 ## License & attribution
 
 - USDA FoodData Central — U.S. Department of Agriculture  

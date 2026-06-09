@@ -4,6 +4,12 @@
 Data/
 *__pycache__/
 .cursor/
+mvp_web/cache/
 .pip_packages/
 
 .DS_Store
+
+# Local experiments, EDA artifacts, and ML run outputs (large binaries)
+scratch/
+mlruns/
+mlartifacts/
