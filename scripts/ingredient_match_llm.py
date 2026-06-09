@@ -55,6 +55,7 @@ from ingredient_query_cache import (
     load_or_build_food_artifacts,
     load_or_build_recipe_artifacts,
 )
+from llm_throttle import throttle_llm_async
 from load_food_4macro import load_food_4macro
 from progress_utils import iter_progress
 from recipe_directions import parse_directions_list, relevant_direction_steps
@@ -134,8 +135,22 @@ RESPONSE_SCHEMA = {
                 "type": "string",
                 "description": "<= 20 words justifying the choice.",
             },
+            "matched_portion_id": {
+                "type": ["integer", "null"],
+                "description": (
+                    "Optional USDA food_portion id when a candidate portion line "
+                    "matches the recipe unit/count token."
+                ),
+            },
+            "negligible_calories": {
+                "type": "boolean",
+                "description": (
+                    "True when the ingredient contributes negligible calories in this recipe "
+                    "context even if grams cannot be resolved (e.g. baking powder, spices)."
+                ),
+            },
         },
-        "required": ["fdc_id", "certainty", "rationale"],
+        "required": ["fdc_id", "certainty", "rationale", "matched_portion_id", "negligible_calories"],
         "additionalProperties": False,
     },
 }
@@ -146,12 +161,17 @@ RESPONSE_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 
-def build_food_index(food_cache_dir: Path, config: StagedMatchConfig) -> StagedFoodIndex:
+def build_food_index(
+    food_cache_dir: Path,
+    config: StagedMatchConfig,
+    *,
+    force: bool = False,
+) -> StagedFoodIndex:
     """Load cached food_4macro embeddings and assemble the staged index."""
     food_raw = load_food_4macro()
     print(f"food_4macro rows: {len(food_raw):,}", flush=True)
     food_name_emb, food_prep_emb, food_dequant_emb = load_or_build_food_artifacts(
-        food_raw, food_cache_dir
+        food_raw, food_cache_dir, force=force
     )[1:4]
     return StagedFoodIndex.from_catalog(
         food_raw,
@@ -362,12 +382,15 @@ async def judge_async(
     model: str,
     user_prompt: str,
     valid_fdc_ids: set[int],
+    *,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
     """One judge call with a single retry on invalid fdc_id."""
+    sys_prompt = system_prompt or SYSTEM_PROMPT
 
     async def _invoke(extra: str | None):
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_prompt + (f"\n\n{extra}" if extra else "")},
         ]
         resp = await client.chat.completions.create(
@@ -404,10 +427,21 @@ async def judge_async(
     except Exception as exc:  # network / parse / API error
         error = f"{type(exc).__name__}: {exc}"
 
+    matched_portion_id = parsed.get("matched_portion_id")
+    if matched_portion_id is not None:
+        try:
+            matched_portion_id = int(matched_portion_id)
+        except (TypeError, ValueError):
+            matched_portion_id = None
+
+    negligible = bool(parsed.get("negligible_calories", False))
+
     return {
         "fdc_id": parsed.get("fdc_id"),
         "certainty": parsed.get("certainty"),
         "rationale": parsed.get("rationale"),
+        "matched_portion_id": matched_portion_id,
+        "negligible_calories": negligible,
         "response": raw_response,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -510,6 +544,11 @@ async def run_judging(
     log_every: int = 25,
     heartbeat_sec: float = 15.0,
     verbose: bool = True,
+    assemble_fn=assemble_rows,
+    system_prompt: str | None = None,
+    disk_checkpoint_path: Any = None,
+    disk_flush_every: int = 100,
+    total_dataset_lines: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Dispatch concurrent LLM calls; checkpoint in batches; stream observability.
 
@@ -520,9 +559,9 @@ async def run_judging(
     - heartbeat every `heartbeat_sec` seconds even if nothing completed (stalls)
     DB writes are batched via execute_values and flushed every `flush_every`.
     """
-    from openai import AsyncOpenAI
+    from openai_fallback import get_async_openai_client
 
-    client = AsyncOpenAI()
+    client = get_async_openai_client()
     sem = asyncio.Semaphore(concurrency)
     loop = asyncio.get_running_loop()
     db_executor = ThreadPoolExecutor(max_workers=1) if use_supabase else None
@@ -543,9 +582,11 @@ async def run_judging(
     stats = {
         "done": 0, "active": 0, "cost": 0.0, "tokens": 0,
         "agree": 0, "abstain": 0, "errors": 0, "checkpointed": 0,
+        "no_portion": 0,
     }
     latencies: list[float] = []
     t_start = time.time()
+    disk_path = Path(disk_checkpoint_path) if disk_checkpoint_path else None
 
     def agg_line(tag: str) -> str:
         done = stats["done"]
@@ -553,11 +594,23 @@ async def run_judging(
         eta = (total - done) / rate if rate > 0 else float("inf")
         p50 = _pct(latencies, 0.50)
         p95 = _pct(latencies, 0.95)
+        nop = stats["no_portion"]
+        nop_run = f"no_portion {nop / max(done, 1):.1%} ({nop}/{done})"
+        nop_overall = ""
+        if total_dataset_lines and disk_path and disk_path.is_file():
+            try:
+                from judge_checkpoint import load_judge_checkpoint, no_portion_rate
+
+                on_disk, _, rate_all = no_portion_rate(load_judge_checkpoint(disk_path))
+                nop_overall = f" | overall {rate_all:.1%} ({on_disk}/{total_dataset_lines})"
+            except Exception:
+                pass
         return (
             f"{tag} {done}/{total} ({done / total:.0%}) | {rate:.1f}/s ETA {eta:4.0f}s | "
             f"${stats['cost']:.4f} {stats['tokens']:,}tok | "
             f"agree {stats['agree'] / max(done,1):.0%} abstain {stats['abstain'] / max(done,1):.0%} "
-            f"err {stats['errors']} | lat p50 {p50:.2f}s p95 {p95:.2f}s | "
+            f"err {stats['errors']} | {nop_run}{nop_overall} | "
+            f"lat p50 {p50:.2f}s p95 {p95:.2f}s | "
             f"inflight {stats['active']}/{concurrency} | ckpt {stats['checkpointed']}"
         )
 
@@ -573,7 +626,11 @@ async def run_judging(
             t0 = time.perf_counter()
             try:
                 judge = await judge_async(
-                    client, model, payload["user_prompt"], payload["valid_fdc_ids"]
+                    client,
+                    model,
+                    payload["user_prompt"],
+                    payload["valid_fdc_ids"],
+                    system_prompt=system_prompt,
                 )
             finally:
                 stats["active"] -= 1
@@ -583,6 +640,22 @@ async def run_judging(
     def flush(exp_rows, cand_rows):
         inference_store.upsert_inferences(conn, exp_rows)
         inference_store.upsert_candidates(conn, cand_rows)
+
+    def flush_disk(exp_rows):
+        if not disk_path or not exp_rows:
+            return
+        from judge_checkpoint import merge_judge_checkpoint, no_portion_rate
+
+        n_disk = merge_judge_checkpoint(disk_path, exp_rows)
+        on_disk = pd.read_parquet(disk_path)
+        _, _, rate_all = no_portion_rate(on_disk)
+        denom = total_dataset_lines or n_disk
+        nop = int(on_disk["grams_status"].eq("no_portion").sum())
+        print(
+            f"  .. checkpointed {len(exp_rows)} rows -> disk "
+            f"(total {n_disk}/{denom}, no_portion {nop / max(denom, 1):.1%})",
+            flush=True,
+        )
 
     async def heartbeat():
         try:
@@ -606,7 +679,7 @@ async def run_judging(
                 # Worker skipped because the breaker was already tripped.
                 breaker["skipped"] += 1
                 continue
-            exp, cand_rows = assemble_rows(
+            exp, cand_rows = assemble_fn(
                 payload, judge, run_id=run_id, run_name=run_name, model=model, pricing=pricing
             )
             all_exp.append(exp)
@@ -623,6 +696,8 @@ async def run_judging(
                 stats["abstain"] += 1
             if exp["llm_error"] is not None:
                 stats["errors"] += 1
+            if exp.get("grams_status") == "no_portion":
+                stats["no_portion"] += 1
             latencies.append(judge.get("latency_sec", 0.0))
 
             if verbose:
@@ -639,6 +714,12 @@ async def run_judging(
 
             if stats["done"] % log_every == 0:
                 print(agg_line(">>"), flush=True)
+
+            if disk_path and len(buf_exp) >= disk_flush_every:
+                await loop.run_in_executor(None, flush_disk, list(buf_exp))
+                stats["checkpointed"] += len(buf_exp)
+                buf_exp.clear()
+                buf_cand.clear()
 
             if use_supabase and len(buf_exp) >= flush_every:
                 await loop.run_in_executor(db_executor, flush, list(buf_exp), list(buf_cand))
@@ -674,6 +755,10 @@ async def run_judging(
                     )
                     print("  [budget] BREAKER TRIPPED — halting new LLM calls, "
                           "draining in-flight requests…", flush=True)
+
+        if disk_path and buf_exp:
+            await loop.run_in_executor(None, flush_disk, list(buf_exp))
+            stats["checkpointed"] += len(buf_exp)
 
         if use_supabase and buf_exp:
             await loop.run_in_executor(db_executor, flush, list(buf_exp), list(buf_cand))

@@ -134,7 +134,9 @@ def semantic_duplicate_pairs(
     scores, neighbors = index.search(vectors, k)
 
     pairs: list[tuple[int, int, float]] = []
-    for pos_i, recipe_id in enumerate(ids):
+    for pos_i, recipe_id in enumerate(
+        tqdm(ids, desc="faiss k-nn pairs", unit="recipe", mininterval=1.0)
+    ):
         for rank in range(1, k):
             pos_j = int(neighbors[pos_i, rank])
             score = float(scores[pos_i, rank])

@@ -29,6 +29,29 @@ PARSE_FIELDS = (
     "parse_method",
 )
 
+UNIFIED_RESULT_FIELDS = PARSE_FIELDS + (
+    "confidence",
+    "measurable",
+    "final_method",
+)
+
+# Explicit vague / non-numeric recipe amounts (measurable=false without LLM).
+_UNMEASURABLE_RE = re.compile(
+    r"\b("
+    r"to taste|as needed|as desired|for garnish|for serving|"
+    r"if desired|or more|or less"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_LEADING_QTY_RE = re.compile(
+    r"^\s*("
+    r"(?:\d+\s+)?\d+/\d+|"
+    r"\d+(?:\.\d+)?|"
+    r"\d+/\d+"
+    r")",
+)
+
 # Leading numeric quantity (mixed number, fraction, or decimal) plus trailing space.
 _QTY_PREFIX_RE = re.compile(
     r"(?:"
@@ -133,6 +156,110 @@ def parse_ingredient_fields(text: str) -> dict[str, Any]:
     return result
 
 
+def empty_parse_result() -> dict[str, Any]:
+    result = {field: None for field in PARSE_FIELDS}
+    result["parse_status"] = "empty"
+    result["parse_method"] = None
+    result["confidence"] = None
+    result["measurable"] = None
+    result["final_method"] = None
+    return result
+
+
+def is_explicitly_unmeasurable(text: str) -> bool:
+    """True when raw text contains vague amount phrases (to taste, or more, etc.)."""
+    if not text or not str(text).strip():
+        return False
+    return bool(_UNMEASURABLE_RE.search(str(text)))
+
+
+def has_ok_parse(result: dict[str, Any]) -> bool:
+    """True when the parser produced a usable structured amount."""
+    status = result.get("parse_status")
+    return status in ("ok", "parsed_size_as_count") and has_usable_amount(result)
+
+
+def should_force_unmeasurable(result: dict[str, Any], *, ingredient_raw: str = "") -> bool:
+    """Downgrade to unmeasurable only when vague phrasing and parse did not succeed."""
+    if not ingredient_raw or not is_explicitly_unmeasurable(ingredient_raw):
+        return False
+    return not has_ok_parse(result)
+
+
+def is_measurable(result: dict[str, Any], *, ingredient_raw: str = "") -> bool:
+    """False when the line is explicitly vague or marked unmeasurable."""
+    if result.get("measurable") is False:
+        return False
+    if ingredient_raw and should_force_unmeasurable(result, ingredient_raw=ingredient_raw):
+        return False
+    return True
+
+
+def has_usable_amount(result: dict[str, Any]) -> bool:
+    return result.get("quantity") is not None and bool(result.get("name"))
+
+
+def needs_llm_fallback(result: dict[str, Any], *, ingredient_raw: str = "") -> bool:
+    """Trigger LLM when no usable measurable amount was extracted."""
+    if should_force_unmeasurable(result, ingredient_raw=ingredient_raw):
+        return False
+    status = result.get("parse_status")
+    if status in ("error", "ambiguous", "no_amount", "empty", "no_quantity"):
+        return True
+    if status in ("ok", "parsed_size_as_count") and has_usable_amount(result):
+        return False
+    if result.get("name") and result.get("quantity") is None:
+        return True
+    return status in ("quantity_no_known_unit", "llm_invalid")
+
+
+def merge_parse_result(
+    base: dict[str, Any],
+    override: dict[str, Any],
+    *,
+    final_method: str,
+) -> dict[str, Any]:
+    """Merge override into base; override wins on non-null fields."""
+    merged = empty_parse_result()
+    for field in PARSE_FIELDS:
+        val = override.get(field)
+        if val is None:
+            val = base.get(field)
+        merged[field] = val
+    merged["confidence"] = override.get("confidence", base.get("confidence"))
+    measurable = override.get("measurable")
+    if measurable is None:
+        measurable = base.get("measurable")
+    merged["measurable"] = measurable
+    merged["final_method"] = final_method
+    if merged.get("parse_status") in (None, "empty"):
+        merged["parse_status"] = override.get("parse_status") or base.get("parse_status")
+    return merged
+
+
+def finalize_parse_result(
+    result: dict[str, Any],
+    *,
+    ingredient_raw: str,
+    final_method: str,
+) -> dict[str, Any]:
+    """Attach measurable/final_method and normalize terminal status."""
+    out = dict(result)
+    out["final_method"] = final_method
+    if should_force_unmeasurable(out, ingredient_raw=ingredient_raw):
+        out["measurable"] = False
+    elif out.get("measurable") is None:
+        out["measurable"] = has_usable_amount(out)
+    if out.get("parse_status") in (None, "empty") and has_usable_amount(out):
+        out["parse_status"] = "ok"
+    return out
+
+
+def looks_parseable_raw(text: str) -> bool:
+    """Heuristic: line starts with a numeric quantity."""
+    return bool(_LEADING_QTY_RE.match(str(text or "")))
+
+
 def _clean_dequant(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\(\s*\)", "", text)
@@ -196,11 +323,20 @@ def _amounts_to_strip(amounts: list[Any]) -> list[Any]:
     if len(amounts) == 1:
         one = amounts[0]
         if getattr(one, "amounts", None):
-            return [a for a in _flatten_amounts([one]) if a.quantity is not None]
-        return [one] if one.quantity is not None else []
+            return [
+                a for a in _flatten_amounts([one])
+                if getattr(a, "quantity", None) is not None
+            ]
+        return [one] if getattr(one, "quantity", None) is not None else []
 
     first = amounts[0]
-    return [first] if first.quantity is not None else []
+    if getattr(first, "amounts", None):
+        flat = [
+            a for a in _flatten_amounts([first])
+            if getattr(a, "quantity", None) is not None
+        ]
+        return flat[:1] if flat else []
+    return [first] if getattr(first, "quantity", None) is not None else []
 
 
 def _spans_in_range(text: str, start: int, end: int, n: int) -> list[tuple[int, int]]:

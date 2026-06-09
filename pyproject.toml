@@ -25,4 +25,5 @@ dependencies = [
     "tqdm>=4.67.0",
     "mlflow>=3",
     "networkx>=3.6.1",
+    "pgvector>=0.4.2",
 ]

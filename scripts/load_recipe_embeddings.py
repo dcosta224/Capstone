@@ -7,6 +7,8 @@ Reads from local RecipeNLG.csv in chunks (default) and uploads to:
   recipe.recipe_nlg_embedding  — vector(384) keyed by recipe_nlg.id
 
 Only rows whose id exists in recipe.recipe_nlg are uploaded (skips ids not loaded yet).
+By default resumes automatically: queries Supabase once at startup for ids already
+in recipe_nlg_features / recipe_nlg_embedding and skips them (use --no-resume to redo).
 
 Prerequisites:
   - recipe.recipe_nlg populated (full or partial load via load_recipes.py)
@@ -25,6 +27,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Iterator
 
 import numpy as np
@@ -118,26 +121,45 @@ def iter_csv_chunks(
             break
 
 
-def ids_in_recipe_nlg(conn, ids: list[int]) -> set[int]:
-    if not ids:
-        return set()
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id FROM recipe.recipe_nlg WHERE id = ANY(%s)",
-            (ids,),
-        )
-        return {int(row[0]) for row in cur.fetchall()}
+@dataclass
+class ResumeState:
+    recipe_nlg_ids: set[int]
+    feature_ids: set[int]
+    embedding_ids: set[int]
 
 
-def existing_ids_in_table(conn, table: str, ids: list[int]) -> set[int]:
-    if not ids:
-        return set()
+def load_id_set(conn, query: str, label: str) -> set[int]:
+    tqdm.write(f"Querying Supabase: {label} …")
     with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT recipe_id FROM {table} WHERE recipe_id = ANY(%s)",
-            (ids,),
-        )
-        return {int(row[0]) for row in cur.fetchall()}
+        configure_session(cur)
+        cur.execute(query)
+        rows = cur.fetchall()
+    ids = {int(row[0]) for row in rows}
+    tqdm.write(f"  {label}: {len(ids):,}")
+    return ids
+
+
+def fetch_resume_state(conn, *, features_only: bool) -> ResumeState:
+    """Load all ids already present in Supabase (one query per table)."""
+    recipe_nlg_ids = load_id_set(
+        conn,
+        "SELECT id FROM recipe.recipe_nlg",
+        "recipe.recipe_nlg ids",
+    )
+    feature_ids = load_id_set(
+        conn,
+        "SELECT recipe_id FROM recipe.recipe_nlg_features",
+        "recipe.recipe_nlg_features ids",
+    )
+    if features_only:
+        return ResumeState(recipe_nlg_ids, feature_ids, set())
+
+    embedding_ids = load_id_set(
+        conn,
+        "SELECT recipe_id FROM recipe.recipe_nlg_embedding",
+        "recipe.recipe_nlg_embedding ids",
+    )
+    return ResumeState(recipe_nlg_ids, feature_ids, embedding_ids)
 
 
 def get_embedding_model():
@@ -202,26 +224,49 @@ def process_chunk(
     insert_batch_size: int,
     encode_batch_size: int,
     features_only: bool,
-    no_resume: bool,
-) -> tuple[int, int]:
-    features = build_recipe_features(raw_chunk, dedup=False)
-    chunk_ids = features["id"].astype(int).tolist()
-    in_db = ids_in_recipe_nlg(conn, chunk_ids)
+    resume: ResumeState | None,
+) -> tuple[int, int, int]:
+    """Returns (n_features, n_embeddings, n_skipped_already_done)."""
+    raw_chunk = normalize_csv_chunk(raw_chunk)
+    if "id" not in raw_chunk.columns:
+        raise ValueError("CSV chunk missing id column")
+
+    chunk_ids = raw_chunk["id"].astype(int).tolist()
+    skipped_before = 0
+    if resume is not None:
+        in_db = {i for i in chunk_ids if i in resume.recipe_nlg_ids}
+        skip_features = resume.feature_ids
+        skip_embeddings = resume.embedding_ids
+        if features_only:
+            skipped_before = sum(1 for i in in_db if i in skip_features)
+        else:
+            skipped_before = sum(1 for i in in_db if i in skip_embeddings)
+    else:
+        with conn.cursor() as cur:
+            configure_session(cur)
+            cur.execute(
+                "SELECT id FROM recipe.recipe_nlg WHERE id = ANY(%s)",
+                (chunk_ids,),
+            )
+            in_db = {int(row[0]) for row in cur.fetchall()}
+        skip_features = set()
+        skip_embeddings = set()
+
     if not in_db:
-        return 0, 0
+        return 0, 0, 0
 
+    if resume is not None:
+        if features_only:
+            if skipped_before == len(in_db):
+                return 0, 0, skipped_before
+        else:
+            needs_embeddings = [i for i in in_db if i not in skip_embeddings]
+            needs_features = [i for i in in_db if i not in skip_features]
+            if not needs_embeddings and not needs_features:
+                return 0, 0, skipped_before
+
+    features = build_recipe_features(raw_chunk, dedup=False)
     features = features[features["id"].isin(in_db)].copy()
-    pending_ids = features["id"].astype(int).tolist()
-
-    skip_features: set[int] = set()
-    skip_embeddings: set[int] = set()
-    if not no_resume:
-        skip_features = existing_ids_in_table(
-            conn, "recipe.recipe_nlg_features", pending_ids
-        )
-        skip_embeddings = existing_ids_in_table(
-            conn, "recipe.recipe_nlg_embedding", pending_ids
-        )
 
     feature_rows = [
         (int(row.id), row.title_clean, row.semantic_text, int(row.ingredient_count))
@@ -254,8 +299,13 @@ def process_chunk(
             n_embeddings = load_embedding_rows(
                 conn, embedding_rows, insert_batch_size
             )
+            if resume is not None:
+                resume.embedding_ids.update(embed_df["id"].astype(int).tolist())
 
-    return n_features, n_embeddings
+    if resume is not None and feature_rows:
+        resume.feature_ids.update(int(row[0]) for row in feature_rows)
+
+    return n_features, n_embeddings, skipped_before
 
 
 def print_embedding_counts(conn) -> None:
@@ -330,6 +380,7 @@ def main() -> None:
     total_features = 0
     total_embeddings = 0
     total_rows = 0
+    total_skipped = 0
 
     with connect() as conn:
         with conn.cursor() as cur:
@@ -349,6 +400,22 @@ def main() -> None:
             + (f" (processing first {target_rows:,})" if args.limit else "")
         )
         tqdm.write(f"Chunk size: {args.chunk_size:,}")
+
+        resume: ResumeState | None = None
+        if not args.no_resume:
+            resume = fetch_resume_state(conn, features_only=args.features_only)
+            if args.features_only:
+                tqdm.write(
+                    f"Resume: {len(resume.feature_ids):,} features already in Supabase"
+                )
+            else:
+                tqdm.write(
+                    f"Resume: {len(resume.embedding_ids):,} embeddings, "
+                    f"{len(resume.feature_ids):,} features already in Supabase"
+                )
+        else:
+            tqdm.write("Resume disabled (--no-resume); all matching rows will be upserted")
+
         tqdm.write(f"Loading {EMBEDDING_MODEL} …")
         get_embedding_model()
 
@@ -363,21 +430,23 @@ def main() -> None:
             for raw_chunk in iter_csv_chunks(
                 args.csv, args.chunk_size, args.limit
             ):
-                n_features, n_embeddings = process_chunk(
+                n_features, n_embeddings, n_skipped = process_chunk(
                     conn,
                     raw_chunk,
                     insert_batch_size=args.insert_batch_size,
                     encode_batch_size=args.encode_batch_size,
                     features_only=args.features_only,
-                    no_resume=args.no_resume,
+                    resume=resume,
                 )
                 total_features += n_features
                 total_embeddings += n_embeddings
+                total_skipped += n_skipped
                 total_rows += len(raw_chunk)
                 progress.update(len(raw_chunk))
                 progress.set_postfix(
                     features=f"{total_features:,}",
                     embeddings=f"{total_embeddings:,}",
+                    skipped=f"{total_skipped:,}",
                     refresh=True,
                 )
         finally:
@@ -389,7 +458,8 @@ def main() -> None:
     elapsed = time.perf_counter() - t0
     tqdm.write(
         f"Done in {elapsed:.1f}s — "
-        f"features: {total_features:,}, embeddings: {total_embeddings:,}"
+        f"features: {total_features:,}, embeddings: {total_embeddings:,}, "
+        f"skipped (already done): {total_skipped:,}"
     )
 
 

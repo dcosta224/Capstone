@@ -989,6 +989,7 @@ def retrieve_llm_candidates(
     *,
     staged_top1_fdc_id: int | None = None,
     precomputed_sims: np.ndarray | None = None,
+    allowed_fdc_ids: set[int] | None = None,
 ) -> pd.DataFrame:
     """Union retrieval for the LLM judge: full-text lexical + global semantic.
 
@@ -1004,6 +1005,14 @@ def retrieve_llm_candidates(
     if n_food == 0:
         return pd.DataFrame()
 
+    allowed_idxs: set[int] | None = None
+    if allowed_fdc_ids is not None:
+        allowed_idxs = {
+            idx
+            for idx, food in enumerate(index.candidates)
+            if food.fdc_id in allowed_fdc_ids
+        }
+
     # --- Semantic channel: global cosine over all foods (normalized embeddings).
     if precomputed_sims is not None:
         sims = np.asarray(precomputed_sims, dtype=np.float32)
@@ -1015,19 +1024,43 @@ def retrieve_llm_candidates(
 
     semantic_idxs: set[int] = set()
     if sims.any():
-        k = min(rc.semantic_top_k, n_food)
-        top_sem = np.argpartition(-sims, k - 1)[:k] if k < n_food else np.arange(n_food)
-        semantic_idxs.update(int(i) for i in top_sem)
-        floor_hits = np.flatnonzero(sims >= rc.semantic_score_floor)
-        if floor_hits.size > rc.semantic_floor_cap:
-            floor_hits = floor_hits[np.argsort(-sims[floor_hits])[: rc.semantic_floor_cap]]
-        semantic_idxs.update(int(i) for i in floor_hits)
+        candidate_idxs = (
+            sorted(allowed_idxs)
+            if allowed_idxs is not None
+            else list(range(n_food))
+        )
+        if candidate_idxs:
+            if allowed_idxs is not None:
+                sub_sims = sims[candidate_idxs]
+                k = min(rc.semantic_top_k, len(candidate_idxs))
+                if k > 0:
+                    top_local = (
+                        np.argpartition(-sub_sims, k - 1)[:k]
+                        if k < len(candidate_idxs)
+                        else np.arange(len(candidate_idxs))
+                    )
+                    semantic_idxs.update(int(candidate_idxs[i]) for i in top_local)
+                floor_hits = np.flatnonzero(sub_sims >= rc.semantic_score_floor)
+                if floor_hits.size > rc.semantic_floor_cap:
+                    floor_hits = floor_hits[np.argsort(-sub_sims[floor_hits])[: rc.semantic_floor_cap]]
+                semantic_idxs.update(int(candidate_idxs[i]) for i in floor_hits)
+            else:
+                k = min(rc.semantic_top_k, n_food)
+                top_sem = np.argpartition(-sims, k - 1)[:k] if k < n_food else np.arange(n_food)
+                semantic_idxs.update(int(i) for i in top_sem)
+                floor_hits = np.flatnonzero(sims >= rc.semantic_score_floor)
+                if floor_hits.size > rc.semantic_floor_cap:
+                    floor_hits = floor_hits[np.argsort(-sims[floor_hits])[: rc.semantic_floor_cap]]
+                semantic_idxs.update(int(i) for i in floor_hits)
 
     # --- Lexical channel: full-text token overlap, scored by dequant lexical sim.
     fulltext_tokens = _fulltext_query_tokens(query)
     pool: set[int] = set()
     for tok in fulltext_tokens:
-        pool |= index.token_index.get(tok, set())
+        hits = index.token_index.get(tok, set())
+        if allowed_idxs is not None:
+            hits = hits & allowed_idxs
+        pool |= hits
 
     lex_scores: dict[int, float] = {}
     for idx in pool:

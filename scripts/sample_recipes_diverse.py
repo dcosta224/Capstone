@@ -2,7 +2,7 @@
 """Select a diversity-representative recipe sample from exported embeddings.
 
 Pipeline:
-  1. Overcluster with MiniBatchKMeans (default k=20,000)
+  1. Overcluster with FAISS K-means (default k=10,000, spherical / cosine)
   2. Pick one medoid per cluster (real recipe closest to centroid)
   3. Select final N recipes with rare-cluster reserve, sqrt-size proportional
      allocation, and MMR (or facility-location) diversity fill
@@ -15,8 +15,7 @@ Usage:
   uv run python scripts/sample_recipes_diverse.py --n-clusters 500 --n-sample 100 \\
       --embed-dir Data/recipes/embeddings   # smoke test on partial load
 
-Reuses cached cluster labels/medoids when a complete k{N} cache exists for the
-requested cluster count (and embedding count). Pass --force-cluster to recompute.
+By default always recomputes clusters. Pass --use-cache to reuse a prior k{N} cache.
 """
 
 from __future__ import annotations
@@ -64,18 +63,20 @@ def _normalize_rows(x: np.ndarray) -> np.ndarray:
     return x / norms
 
 
-def run_kmeans(
-    embeddings: np.ndarray,
+def run_faiss_kmeans(
+    embeddings: np.memmap | np.ndarray,
     *,
     n_clusters: int,
     seed: int,
-    batch_size: int,
-    max_iter: int,
+    niter: int,
+    assign_batch_size: int,
+    n_threads: int,
+    max_points_per_centroid: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (labels int32 shape (n,), centroids float32 (k, d))."""
-    from sklearn.cluster import MiniBatchKMeans
+    import faiss
 
-    n = len(embeddings)
+    n, d = embeddings.shape
     k = min(n_clusters, n)
     if k < n_clusters:
         print(
@@ -83,24 +84,54 @@ def run_kmeans(
             flush=True,
         )
 
-    print(f"MiniBatchKMeans: k={k:,}, n={n:,}, batch_size={batch_size}", flush=True)
-    t0 = time.perf_counter()
-    km = MiniBatchKMeans(
-        n_clusters=k,
-        random_state=seed,
-        batch_size=min(batch_size, n),
-        max_iter=max_iter,
-        n_init=3,
-        reassignment_ratio=0.01,
-        verbose=1,
+    if n_threads > 0:
+        faiss.omp_set_num_threads(n_threads)
+
+    # Ensure training sees the full corpus: cap = max_points_per_centroid * k ≥ n
+    min_ppc = (n + k - 1) // k
+    ppc = max(max_points_per_centroid, min_ppc)
+
+    print(
+        f"FAISS K-means: k={k:,}, n={n:,}, niter={niter}, "
+        f"max_points_per_centroid={ppc:,}",
+        flush=True,
     )
-    # Pass memmap directly — avoid copying ~n×d float32 into RAM.
-    labels = km.fit_predict(embeddings)
-    centroids = km.cluster_centers_.astype(np.float32)
+    t0 = time.perf_counter()
+    km = faiss.Kmeans(
+        d,
+        k,
+        niter=niter,
+        nredo=1,
+        verbose=True,
+        seed=seed,
+        spherical=True,
+        max_points_per_centroid=ppc,
+        min_points_per_centroid=1,
+    )
+    # Memmap is readable by FAISS without a full-RAM copy.
+    km.train(embeddings)
+
+    centroids = np.asarray(km.centroids, dtype=np.float32).reshape(k, d)
     centroids = _normalize_rows(centroids)
+
+    labels = np.empty(n, dtype=np.int32)
+    assign_bs = min(assign_batch_size, n)
+    show_assign = progress_enabled_for_count(n, threshold=100_000)
+    for start in iter_progress(
+        range(0, n, assign_bs),
+        total=(n + assign_bs - 1) // assign_bs,
+        desc="Assign labels",
+        enabled=show_assign,
+        unit="batch",
+    ):
+        end = min(start + assign_bs, n)
+        batch = np.asarray(embeddings[start:end], dtype=np.float32)
+        _, idx = km.index.search(batch, 1)
+        labels[start:end] = idx.ravel().astype(np.int32)
+
     elapsed = time.perf_counter() - t0
     print(f"Clustering done in {elapsed:.1f}s", flush=True)
-    return labels.astype(np.int32), centroids
+    return labels, centroids
 
 
 def compute_medoids(
@@ -127,7 +158,7 @@ def compute_medoids(
 
     rows: list[dict] = []
     show_progress = progress_enabled_for_count(len(active_cids), threshold=100)
-    for i, cid in iter_progress(
+    for i in iter_progress(
         range(len(active_cids)),
         total=len(active_cids),
         desc="Medoids",
@@ -496,10 +527,13 @@ def run_pipeline(
     rare_percentile: float,
     mmr_lambda: float,
     selector: str,
-    kmeans_batch_size: int,
-    kmeans_max_iter: int,
+    cluster_niter: int,
+    assign_batch_size: int,
+    n_threads: int,
+    max_points_per_centroid: int,
     medoid_max_members: int,
-    force_cluster: bool,
+    use_cache: bool,
+    save_cache: bool,
 ) -> dict:
     recipe_ids, embeddings = load_embedding_artifacts(embed_dir)
     n = len(recipe_ids)
@@ -507,20 +541,19 @@ def run_pipeline(
     k_target = effective_n_clusters(n_clusters, n)
     print(f"Loaded {n:,} embeddings (dims={manifest.get('dims')})", flush=True)
 
-    cached = None if force_cluster else load_cluster_cache(cluster_dir, n_clusters, n)
+    cached = load_cluster_cache(cluster_dir, n_clusters, n) if use_cache else None
     if cached is not None:
         labels, centroids, medoids = cached
     else:
-        if force_cluster:
-            print(f"Reclustering (--force-cluster): k={k_target:,}, n={n:,}", flush=True)
-        else:
-            print(f"Clustering: k={k_target:,}, n={n:,}", flush=True)
-        labels, centroids = run_kmeans(
+        print(f"Clustering: k={k_target:,}, n={n:,}", flush=True)
+        labels, centroids = run_faiss_kmeans(
             embeddings,
             n_clusters=n_clusters,
             seed=seed,
-            batch_size=kmeans_batch_size,
-            max_iter=kmeans_max_iter,
+            niter=cluster_niter,
+            assign_batch_size=assign_batch_size,
+            n_threads=n_threads,
+            max_points_per_centroid=max_points_per_centroid,
         )
         medoids = compute_medoids(
             recipe_ids,
@@ -530,7 +563,8 @@ def run_pipeline(
             medoid_max_members=medoid_max_members,
             seed=seed,
         )
-        save_cluster_cache(cluster_dir, k_target, labels, centroids, medoids)
+        if save_cache:
+            save_cluster_cache(cluster_dir, k_target, labels, centroids, medoids)
 
     k_eff = centroids.shape[0]
     print("Selecting final sample…", flush=True)
@@ -590,7 +624,7 @@ def main() -> None:
     parser.add_argument("--embed-dir", type=Path, default=DEFAULT_EMBED_DIR)
     parser.add_argument("--cluster-dir", type=Path, default=DEFAULT_CLUSTER_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--n-clusters", type=int, default=20_000)
+    parser.add_argument("--n-clusters", type=int, default=10_000)
     parser.add_argument("--n-sample", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rare-quota", type=int, default=150)
@@ -601,14 +635,44 @@ def main() -> None:
     parser.add_argument("--mmr-lambda", type=float, default=0.7,
                         help="MMR breadth weight (higher = more diversity).")
     parser.add_argument("--selector", choices=("mmr", "facility_location"), default="mmr")
-    parser.add_argument("--kmeans-batch-size", type=int, default=4096)
-    parser.add_argument("--kmeans-max-iter", type=int, default=100)
+    parser.add_argument(
+        "--cluster-niter",
+        type=int,
+        default=20,
+        help="FAISS K-means iterations (default 20).",
+    )
+    parser.add_argument(
+        "--assign-batch-size",
+        type=int,
+        default=65_536,
+        help="Batch size for final label assignment pass.",
+    )
+    parser.add_argument(
+        "--n-threads",
+        type=int,
+        default=0,
+        help="FAISS OpenMP threads (0 = use all cores).",
+    )
+    parser.add_argument(
+        "--max-points-per-centroid",
+        type=int,
+        default=512,
+        help=(
+            "FAISS training subsample cap per centroid; auto-raised so "
+            "max_points_per_centroid * k >= n (full corpus training)."
+        ),
+    )
     parser.add_argument("--medoid-max-members", type=int, default=5000,
                         help="Subsample large clusters when scoring medoids.")
     parser.add_argument(
-        "--force-cluster",
+        "--use-cache",
         action="store_true",
-        help="Ignore cached cluster labels/medoids and rerun k-means + medoids.",
+        help="Reuse cached cluster labels/medoids when available.",
+    )
+    parser.add_argument(
+        "--save-cache",
+        action="store_true",
+        help="Write cluster labels/centroids/medoids to --cluster-dir after clustering.",
     )
     args = parser.parse_args()
 
@@ -628,10 +692,13 @@ def main() -> None:
         rare_percentile=args.rare_percentile,
         mmr_lambda=args.mmr_lambda,
         selector=args.selector,
-        kmeans_batch_size=args.kmeans_batch_size,
-        kmeans_max_iter=args.kmeans_max_iter,
+        cluster_niter=args.cluster_niter,
+        assign_batch_size=args.assign_batch_size,
+        n_threads=args.n_threads,
+        max_points_per_centroid=args.max_points_per_centroid,
         medoid_max_members=args.medoid_max_members,
-        force_cluster=args.force_cluster,
+        use_cache=args.use_cache,
+        save_cache=args.save_cache,
     )
 
 
