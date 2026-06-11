@@ -15,6 +15,8 @@ Capstone/
 │   ├── db.py                      # Shared Supabase connection from .env
 │   ├── infer_schema.py            # Introspect usda schema + infer joins
 │   ├── load_recipes.py            # recipe schema (Open Recipes + RecipeNLG)
+│   ├── load_recipe_embeddings.py  # MiniLM vectors → recipe.recipe_nlg_embedding
+│   ├── dedupe_recipe_nlg.py       # Kadin hybrid dedup (DELETE duplicates)
 │   └── load_food_density.py       # PDF → CSV → conversions schema
 ├── sql/                           # DDL and psql-based USDA bulk load
 │   ├── 00_create_schema.sql …     # usda tables + COPY scripts
@@ -175,7 +177,28 @@ uv run python scripts/load_recipes.py --extract-only   # not applicable (JSON/CS
 uv run python scripts/load_recipes.py --nlg-only       # resume RecipeNLG after partial load
 ```
 
-### 3. Food density / conversions (Python)
+### 3. Recipe embeddings (Python)
+
+Streams local `Data/recipes/RecipeNLG.csv` in chunks (does not load 2.2M rows from Supabase). Uploads only ids present in `recipe.recipe_nlg`. Enable **pgvector** first.
+
+```bash
+uv run python scripts/load_recipe_embeddings.py --limit 5000   # smoke test
+uv run python scripts/load_recipe_embeddings.py                  # full CSV → DB
+```
+
+### 4. Recipe deduplication (Python)
+
+Kadin's hybrid pipeline from `exploration.ipynb`. **Dry-run first**, then delete:
+
+```bash
+uv run python scripts/dedupe_recipe_nlg.py --dry-run
+uv run python scripts/dedupe_recipe_nlg.py --limit 10000 --dry-run
+uv run python scripts/dedupe_recipe_nlg.py --execute
+```
+
+Phase 1 removes exact duplicates (same title + ingredients + directions). Phase 2 uses MiniLM/FAISS/hybrid scoring and keeps one recipe per cluster (most ingredients, then longest directions). Manifests: `Data/dedup/`. Use `--use-db-embeddings` if vectors are already loaded.
+
+### 5. Food density / conversions (Python)
 
 ```bash
 uv run python scripts/load_food_density.py           # PDF → CSV → DB
@@ -185,7 +208,7 @@ uv run python scripts/load_food_density.py --load-only
 
 CSV output: `Data/conversions/food_density.csv`.
 
-### 4. Schema introspection
+### 6. Schema introspection
 
 ```bash
 uv run python scripts/infer_schema.py
@@ -219,80 +242,149 @@ Place files under `Data/` (not tracked in git):
 
 ---
 
-## MVP: load resolved recipes + nutrients (Supabase)
+## Ingredient resolution pipeline (`fdc_id` + `gram_weight`)
 
-After a v4 feasibility run (`scratch/EDA/portion_feasibility_1000_v4_no_portion/pipeline_matches.parquet`), load the **106 fully-resolved recipes** into Supabase:
+Each RecipeNLG ingredient line is resolved to a USDA **`fdc_id`** (`llm_fdc_id` in artifacts) and a **`grams`** value (gram weight for that line’s quantity). The pipeline is orchestrated by `scripts/portion_pipeline_feasibility.py` and logged to MLflow experiment `portion_pipeline_feasibility`.
 
-```bash
-# 1. Per-ingredient fdc_id + gram_weight (+ portion_id where applicable)
-uv run python scripts/load_resolved_recipes.py --dry-run
-uv run python scripts/load_resolved_recipes.py --execute
+### End-to-end flow
 
-# 2. Per-recipe nutrient totals (wide table; amounts scaled from per-100g USDA values)
-uv run python scripts/load_recipe_nutrients.py --dry-run
-uv run python scripts/load_recipe_nutrients.py --execute
+```mermaid
+flowchart TD
+  A[RecipeNLG ingredient line] --> B[Rules parse + ResolutionPlan]
+  B --> C{Needs line enrichment?}
+  C -->|yes| D[Line enrichment LLM]
+  C -->|no| E[Amount kind final]
+  D --> E
+  E --> F[Portion-aware retrieval]
+  F --> G[FDC judge LLM v4]
+  G --> H[resolve_grams_from_plan]
+  H --> I{rules_grams_status = no_portion?}
+  I -->|yes, volume/count| J[Portion pick LLM rescue]
+  I -->|no| K[pipeline_matches.parquet]
+  J --> K
+  K --> L[feasibility_report.json]
 ```
 
-| Table | Rows (expected) | Contents |
-|-------|-----------------|----------|
-| `recipe.resolved_recipes` | ~634 | One row per ingredient line |
-| `recipe.recipe_nutrients` | 106 | One row per recipe; columns like `energy_kcal`, `protein_g`, … |
+| Phase | Script / module | Output |
+|-------|-----------------|--------|
+| 1. Parse + plan | `recipe_parse_rules.py`, `resolution_plan.py`, `line_enrichment_llm.py` | `amount_classification.parquet` |
+| 2. Retrieval + judge | `portion_aware_match.py`, `ingredient_match_llm_portion.py` | `judge_matches_raw.parquet` |
+| 3. Rules grams | `portion_gram.py` (`resolve_grams_from_plan`) | `rules_grams`, `rules_grams_status` |
+| 4. Portion LLM rescue | `portion_resolve_llm.py` | Updates `grams` when rules returned `no_portion` |
+| 5. Report | `portion_pipeline_feasibility.py`, `feasibility_mlflow.py` | `feasibility_report.json`, MLflow run |
 
-DDL: [`sql/11_create_resolved_recipes.sql`](sql/11_create_resolved_recipes.sql). Nutrient table schema is generated from `usda.nutrient` at load time.
+**Gram resolution ladder** (`portion_gram.py`): tries embedded/explicit mass → volume portion → count portion (with container-mass and whole-item fallbacks) → terminal flags (`vague_amount`, `ambiguous_accepted`, `negligible_calories`) → `no_portion` if nothing worked. Judge-time resolution uses the LLM’s optional `matched_portion_id`.
 
-EDA: [`scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb`](scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb)
+### Running the feasibility pipeline
 
----
-
-## MVP recipe recommendation (local web app)
-
-Ranks the **106 fully-resolved recipes** by semantic similarity (MiniLM) and PFC calorie-fraction fit, optimizes portions on the top 10 via convex SCA (PFC gram targets at the **midpoint kcal** of your calorie range, with total kcal fixed at that midpoint), then uses an LLM judge for the final pick. The UI streams pipeline progress in real time over SSE.
-
-### Prerequisites
-
-- Supabase tables populated: `recipe.resolved_recipes`, `recipe.recipe_nutrients`, `recipe.recipe_nlg_features`, `recipe.recipe_nlg_embedding`
-- `.env` with Postgres pool vars (see above)
-- `OPENAI_API_KEY` for LLM judge (falls back to deterministic mock if unset)
-- `HF_TOKEN` optional (Hugging Face model download cache)
-
-Apply debug-log schema (optional, also auto-created on first run):
+Requires local `Data/recipes/RecipeNLG.csv`, USDA data in Supabase, and `.env` configured.
 
 ```bash
-psql "$DATABASE_URL" -f sql/13_create_mvp_logs_schema.sql
+# Full 1,000-recipe sample (seed 42)
+uv run python scripts/portion_pipeline_feasibility.py --n-recipes 1000 --seed 42
+
+# v4 retry: re-judge only former no_portion rows (writes to separate dir)
+uv run python scripts/portion_pipeline_feasibility.py \
+  --n-recipes 1000 --seed 42 --only-no-portion --force-payloads \
+  --baseline-dir scratch/EDA/portion_feasibility_1000
+
+# Golden regression tests (no API)
+uv run python tests/test_portion_resolution_cases.py
 ```
 
-### Run locally
+Artifacts land under `scratch/EDA/portion_feasibility_1000_v4_no_portion/` (v4 run; baseline dir is read-only). Large caches (`payloads.pkl`, `recipe_cache/`, parquets) are gitignored — regenerate locally.
 
-```bash
-uv sync
-# Optional: pre-build disk cache (faster first request; uses local embeddings export if present)
-uv run python scripts/warm_mvp_cache.py
+### Latest run results (v4, 1,000 recipes / seed 42)
 
-uv run uvicorn mvp_web.server:app --reload --port 8000
-```
+Prompt version: `v4_portion_good_enough`. Merged output: **6,095** preserved v3 lines + **2,659** v4 re-judged `no_portion` lines = **8,754** ingredient lines.
 
-On startup the server **warms the in-memory cache** (106 recipes, embeddings, ingredients, USDA nutrients) from `mvp_web/cache/mvp_corpus.pkl` or Supabase. Subsequent demo queries skip corpus DB loads.
+#### Headline metrics
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Submit taste text plus calorie and PFC % ranges. The UI streams pipeline stages (ranking → optimizer → judge) and shows the structured recipe with USDA descriptions, portion labels, and optimized quantities.
+| Metric | Value | Meaning |
+|--------|------:|---------|
+| **`fdc_and_gram_rate_all`** | **71.1%** | Lines with both `llm_fdc_id` and `grams` |
+| `fdc_match_rate_all` | 88.0% | Lines with any fdc match |
+| `gram_resolve_rate_all` | 71.1% | Lines with non-null `grams` |
+| `fdc_and_gram_rate_needs_portion` | 75.7% | Same, on 7,466 volume/count lines |
+| `rules_gram_rate_needs_portion_given_fdc` | 80.9% | Rules resolve grams when fdc exists |
+| `llm_portion_rescue_rate_needs_portion` | 4.9% | Second-pass portion LLM saved grams |
+| `no_portion_rate` | 3.9% (345 lines) | Still unresolved after all passes |
+| `judge_error_count` | 6 | Hard API failures |
 
-### Tests
+**Improvement vs baseline v3:** 58.7% → **71.1%** fdc+grams (+12.4 pp). `no_portion` dropped from 2,659 → **345** globally after v4 judge + portion LLM rescue (324 rescues → `ok_count_portion_llm`).
 
-```bash
-uv run pytest tests/ -v
-```
+#### By amount kind
 
-### Key modules
+| Kind | Lines | fdc + grams |
+|------|------:|------------:|
+| Volume | 4,909 | **81.2%** |
+| Mass | 963 | **89.1%** |
+| Count | 2,242 | **61.5%** |
+| Unknown | 640 | 0.0% |
 
-| Path | Role |
-|------|------|
-| `scripts/recipe_macro_optimizer.py` | Log-ratio portion optimizer (CVXPY + SCA) |
-| `scripts/mvp_nutrient_fit.py` | PFC calorie-fraction range distance |
-| `scripts/mvp_recipe_ranker.py` | Stage-1 combined ranking |
-| `scripts/mvp_pipeline.py` | Full orchestrator + SSE events |
-| `scripts/mvp_recipe_judge.py` | LLM final selection |
-| `mvp_web/server.py` | FastAPI + SSE endpoint |
+Count resolution is the main weakness; volume and mass are strong.
 
-Pipeline runs are logged to `mvp_logs.query_runs` and `mvp_logs.stage_events` when Supabase is reachable.
+#### Remaining failures (`grams` null)
+
+| `grams_status` | Lines | Notes |
+|----------------|------:|-------|
+| `missing_fdc` | 2,152 | Judge abstained or sentinel `999000001` (no gram path) |
+| `no_portion` | 345 | Has fdc, all portion paths failed |
+| `vague_amount` | 16 | “to taste”, no quantity |
+| `unresolvable_serving_only` | 11 | USDA only has serving portions |
+| `ambiguous_accepted` | 4 | Deliberately skipped |
+| `bad_unit` | 4 | e.g. gallons |
+
+`no_portion` is only one failure mode — lines can lack grams for other reasons and were **not** included in the v4 `--only-no-portion` retry.
+
+#### Recipe-level (MVP)
+
+| Bucket | Recipes | % of 1,000 |
+|--------|--------:|-----------:|
+| **All lines gram-resolved** | **106** | **10.6%** |
+| All but 1 unresolved | 248 | 24.8% |
+| ≤1 unresolved | 354 | 35.4% |
+| Median unresolved lines / recipe | 2 | — |
+
+**MVP candidate set:** 106 recipes where every ingredient line has `grams` (634 lines total). See recipe-level EDA below.
+
+#### Sample provenance (RecipeNLG metadata)
+
+| NLG `source` | Recipes |
+|--------------|--------:|
+| Gathered | 737 |
+| Recipes1M | 263 |
+
+Top link domains in the 1,000-recipe sample: `cookbooks.com` (379), `food.com` (266), `epicurious.com` (59), …
+
+### EDA notebooks (start here)
+
+Your partner should open these with Jupyter kernel cwd = `Capstone/` or `scratch/EDA/`:
+
+| Notebook | Purpose |
+|----------|---------|
+| **[scratch/EDA/portion_feasibility_run_eda.ipynb](scratch/EDA/portion_feasibility_run_eda.ipynb)** | Line-level EDA: resolution rates, `grams_status` breakdown, amount-kind charts |
+| **[scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb](scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb)** | **Recipe-level EDA:** 106 fully resolved recipes, all-but-one counts, domain breakdown |
+| [scratch/EDA/count_portion_eda.ipynb](scratch/EDA/count_portion_eda.ipynb) | Deep dive on count-portion matching |
+| [scratch/EDA/usda_portion_and_recipe_feasibility.ipynb](scratch/EDA/usda_portion_and_recipe_feasibility.ipynb) | Earlier USDA portion feasibility exploration |
+
+v4 run artifacts (local, not in git): `scratch/EDA/portion_feasibility_1000_v4_no_portion/` — `pipeline_matches.parquet`, `feasibility_report.json`, `judge_matches_raw.parquet`.
+
+### Design docs
+
+- **[docs/portion_resolution_roadmap.md](docs/portion_resolution_roadmap.md)** — implemented vs deferred features, metrics to track
+
+### Key scripts
+
+| Script | Role |
+|--------|------|
+| `portion_pipeline_feasibility.py` | Full feasibility orchestration + report |
+| `ingredient_match_llm_portion.py` | Portion-aware retrieval + FDC judge |
+| `portion_gram.py` | Gram resolution ladder + fallbacks |
+| `portion_aware_match.py` | Tiered retrieval blending semantic + portion scores |
+| `portion_resolve_llm.py` | LLM portion pick for `no_portion` rescue |
+| `resolution_plan.py` | Multi-path resolution plans per ingredient line |
+| `feasibility_mlflow.py` | Auto-incrementing `feasibility_version` + MLflow logging |
 
 ---
 

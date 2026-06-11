@@ -1,0 +1,219 @@
+{
+  "cases": [
+    {
+      "id": "cream_cheese_embedded_mass",
+      "description": "1 (8 oz.) pkg cream cheese uses parenthetical mass before count",
+      "ingredient": "1 (8 oz.) pkg cream cheese",
+      "parse": {"quantity": 1, "unit": "pkg", "name": "cream cheese"},
+      "fdc_id": 100001,
+      "expected_status": "ok_embedded_mass",
+      "expected_grams_min": 226.0,
+      "expected_grams_max": 228.0
+    },
+    {
+      "id": "asparagus_parenthetical_override",
+      "description": "6 stalks with (about 8 ounces) total weight overrides count",
+      "ingredient": "6 stalks asparagus (about 8 ounces)",
+      "parse": {"quantity": 6, "unit": "stalk", "name": "asparagus"},
+      "fdc_id": 100002,
+      "expected_status": "ok_embedded_mass",
+      "expected_grams_min": 226.0,
+      "expected_grams_max": 228.0
+    },
+    {
+      "id": "green_onions_small_count",
+      "description": "8 small green onions matches small modifier on count portion",
+      "ingredient": "8 small green onions",
+      "parse": {"quantity": 8, "unit": "onion", "name": "green onions", "size": "small"},
+      "fdc_id": 170005,
+      "count_portion_index": {
+        "170005": [
+          {
+            "portion_id": 9001,
+            "fdc_id": 170005,
+            "ref_amount": 1.0,
+            "count_label": "onion",
+            "gram_weight": 25.0,
+            "seq_num": 1,
+            "data_points": 5,
+            "modifier": "small (3\" long)",
+            "portion_description": ""
+          }
+        ]
+      },
+      "expected_status": "ok_count_portion",
+      "expected_grams": 200.0
+    },
+    {
+      "id": "eggs_generic_count",
+      "description": "3 eggs uses size fallback on size-only egg catalog",
+      "ingredient": "3 eggs",
+      "parse": {"quantity": 3, "unit": "each", "name": "eggs"},
+      "fdc_id": 171287,
+      "count_portion_index": {
+        "171287": [
+          {
+            "portion_id": 88378,
+            "fdc_id": 171287,
+            "ref_amount": 1.0,
+            "count_label": "medium",
+            "gram_weight": 44.0,
+            "seq_num": 4,
+            "data_points": 5,
+            "modifier": "medium",
+            "portion_description": ""
+          },
+          {
+            "portion_id": 88374,
+            "fdc_id": 171287,
+            "ref_amount": 1.0,
+            "count_label": "large",
+            "gram_weight": 50.0,
+            "seq_num": 1,
+            "data_points": 5,
+            "modifier": "large",
+            "portion_description": ""
+          }
+        ]
+      },
+      "expected_status": "ok_count_portion",
+      "expected_grams": 132.0
+    },
+    {
+      "id": "mushrooms_generic_count",
+      "description": "10 mushrooms uses small size fallback",
+      "ingredient": "10 mushrooms",
+      "parse": {"quantity": 10, "unit": "each", "name": "mushrooms"},
+      "fdc_id": 169251,
+      "count_portion_index": {
+        "169251": [
+          {
+            "portion_id": 84531,
+            "fdc_id": 169251,
+            "ref_amount": 1.0,
+            "count_label": "small",
+            "gram_weight": 10.0,
+            "seq_num": 5,
+            "data_points": 5,
+            "modifier": "small",
+            "portion_description": ""
+          }
+        ]
+      },
+      "expected_status": "ok_count_portion",
+      "expected_grams": 100.0
+    },
+    {
+      "id": "cream_mushroom_can_container",
+      "description": "1 can soup matches container mass modifier",
+      "ingredient": "1 can cream of mushroom soup",
+      "parse": {"quantity": 1, "unit": "can", "name": "cream of mushroom soup"},
+      "fdc_id": 171607,
+      "count_portion_index": {"171607": []},
+      "raw_portion_rows": [
+        {
+          "id": 89067,
+          "fdc_id": 171607,
+          "modifier": "can (10.75 oz)",
+          "portion_description": "",
+          "measure_unit_name": "undetermined",
+          "gram_weight": 305.0,
+          "measure_unit_id": 9999,
+          "amount": 1.0,
+          "seq_num": 2,
+          "data_points": 1
+        }
+      ],
+      "expected_status": "ok_count_portion",
+      "expected_grams": 305.0
+    },
+    {
+      "id": "eggplant_medium_whole_item",
+      "description": "1 medium eggplant uses whole-item mass proxy",
+      "ingredient": "1 medium eggplant",
+      "parse": {"quantity": 1, "unit": "each", "name": "eggplant", "size": "medium"},
+      "fdc_id": 169228,
+      "count_portion_index": {"169228": []},
+      "raw_portion_rows": [
+        {
+          "id": 84476,
+          "fdc_id": 169228,
+          "modifier": "eggplant, unpeeled (approx 1-1/4 lb)",
+          "portion_description": "",
+          "measure_unit_name": "undetermined",
+          "gram_weight": 548.0,
+          "measure_unit_id": 9999,
+          "amount": 1.0,
+          "seq_num": 2,
+          "data_points": 1
+        }
+      ],
+      "expected_status": "ok_count_portion",
+      "expected_grams": 548.0
+    },
+    {
+      "id": "baking_powder_negligible",
+      "description": "baking powder with LLM negligible flag when no portion",
+      "ingredient": "1 dash baking powder",
+      "parse": {"quantity": 1, "unit": "dash", "name": "baking powder"},
+      "fdc_id": 600001,
+      "count_portion_index": {"600001": []},
+      "raw_portion_rows": [],
+      "llm_negligible_calories": true,
+      "expected_status": "negligible_calories",
+      "expected_grams": 0.0
+    },
+    {
+      "id": "wieners_serving_only",
+      "description": "8 wieners with only serving mass portions is terminal",
+      "ingredient": "8 wieners",
+      "parse": {"quantity": 8, "unit": "wiener", "name": "wieners"},
+      "fdc_id": 200001,
+      "count_portion_index": {"200001": []},
+      "raw_portion_rows": [
+        {
+          "id": 8001,
+          "fdc_id": 200001,
+          "modifier": "serving",
+          "portion_description": "",
+          "measure_unit_name": "undetermined",
+          "gram_weight": 45.0
+        }
+      ],
+      "expected_status": "unresolvable_serving_only"
+    },
+    {
+      "id": "garlic_vague_amount",
+      "description": "a bit of garlic without numeric estimate is vague_amount",
+      "ingredient": "a bit of garlic",
+      "parse": {"quantity": null, "unit": null, "name": "garlic"},
+      "fdc_id": 300001,
+      "expected_status": "vague_amount"
+    },
+    {
+      "id": "parsley_chives_compound",
+      "description": "compound parsley and chives with negligible calories skipped",
+      "ingredient": "parsley and chives",
+      "parse": {"quantity": null, "unit": null, "name": "parsley and chives"},
+      "enrichment": {
+        "is_compound": true,
+        "components": ["parsley", "chives"],
+        "negligible_calories": true,
+        "flags": ["compound_ingredient", "negligible_calorie_compound"]
+      },
+      "fdc_id": 400001,
+      "expected_status": "compound_skipped",
+      "expected_grams": 0.0
+    },
+    {
+      "id": "pretzels_ambiguous_accepted",
+      "description": "1 small box pretzels accepted as ambiguous when no portion match",
+      "ingredient": "1 small box pretzels",
+      "parse": {"quantity": 1, "unit": "box", "name": "pretzels", "size": "small"},
+      "fdc_id": 500001,
+      "count_portion_index": {"500001": []},
+      "raw_portion_rows": [],
+      "expected_status": "ambiguous_accepted"
+    }
+  ]
+}

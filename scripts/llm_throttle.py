@@ -1,4 +1,4 @@
-"""Global spacing between OpenAI calls to stay under 500 RPM."""
+"""Global spacing between OpenAI calls to stay under 500 RPM (60/500 s each)."""
 
 from __future__ import annotations
 
@@ -7,13 +7,16 @@ import threading
 import time
 import weakref
 
+# 500 requests per 60 seconds → minimum gap between any two calls
 LLM_CALL_INTERVAL_SEC = 60 / 500
 
+# Per-event-loop lock (module-level asyncio.Lock breaks across asyncio.run() calls)
 _loop_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
     weakref.WeakKeyDictionary()
 )
 _async_last = 0.0
 _async_last_lock = threading.Lock()
+
 _sync_lock = threading.Lock()
 _sync_last = 0.0
 
@@ -28,6 +31,7 @@ def _async_lock() -> asyncio.Lock:
 
 
 async def throttle_llm_async() -> None:
+    """Await until at least LLM_CALL_INTERVAL_SEC since the previous async call."""
     global _async_last
     async with _async_lock():
         with _async_last_lock:
@@ -39,6 +43,7 @@ async def throttle_llm_async() -> None:
 
 
 def throttle_llm_sync() -> None:
+    """Block until at least LLM_CALL_INTERVAL_SEC since the previous sync call."""
     global _sync_last
     with _sync_lock:
         now = time.monotonic()

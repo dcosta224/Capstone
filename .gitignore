@@ -7,9 +7,26 @@ Data/
 mvp_web/cache/
 .pip_packages/
 
-.DS_Store
-
-# Local experiments, EDA artifacts, and ML run outputs (large binaries)
-scratch/
+# MLflow local tracking + artifact stores
 mlruns/
 mlartifacts/
+mlflow.db
+
+*.csv
+*.txt
+*.png
+*.npy
+*.parquet
+*.json
+!tests/fixtures/*.json
+*.jsonl
+*.jsonl.gz
+*.jsonl.gz.part
+*.jsonl.gz.part.1
+*.jsonl.gz.part.2
+*.jsonl.gz.part.3
+*.jsonl.gz.part.4
+*.jsonl.gz.part.5
+*.pkl
+
+.DS_Store
