@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recipe MVP</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Recipe Recommendation MVP</h1>
+      <p>Describe your taste and target macro calorie fractions. PFC targets apply at the midpoint of your calorie range.</p>
+    </header>
+
+    <form id="query-form">
+      <section class="panel">
+        <h2>Taste preferences</h2>
+        <textarea id="taste_text" rows="4" placeholder="e.g. light, fresh, mediterranean" required></textarea>
+      </section>
+
+      <section class="panel">
+        <h2>Calories &amp; macro targets</h2>
+        <div class="targets-grid">
+          <div class="target-col">
+            <h3>Calories (kcal)</h3>
+            <div class="minmax-rows">
+              <label class="minmax-row">
+                <span class="minmax-label">Min</span>
+                <input type="number" id="kcal_min" value="500" min="0" step="10" required />
+              </label>
+              <label class="minmax-row">
+                <span class="minmax-label">Max</span>
+                <input type="number" id="kcal_max" value="600" min="0" step="10" required />
+              </label>
+            </div>
+          </div>
+          <div class="target-col">
+            <h3>Fat %</h3>
+            <div class="minmax-rows">
+              <label class="minmax-row">
+                <span class="minmax-label">Min</span>
+                <input type="number" id="fat_min" value="25" min="0" max="100" step="0.1" required />
+              </label>
+              <label class="minmax-row">
+                <span class="minmax-label">Max</span>
+                <input type="number" id="fat_max" value="30" min="0" max="100" required />
+              </label>
+            </div>
+          </div>
+          <div class="target-col">
+            <h3>Carbs %</h3>
+            <div class="minmax-rows">
+              <label class="minmax-row">
+                <span class="minmax-label">Min</span>
+                <input type="number" id="carb_min" value="35" min="0" max="100" required />
+              </label>
+              <label class="minmax-row">
+                <span class="minmax-label">Max</span>
+                <input type="number" id="carb_max" value="40" min="0" max="100" required />
+              </label>
+            </div>
+          </div>
+          <div class="target-col">
+            <h3>Protein %</h3>
+            <div class="minmax-rows">
+              <label class="minmax-row">
+                <span class="minmax-label">Min</span>
+                <input type="number" id="protein_min" value="30" min="0" max="100" required />
+              </label>
+              <label class="minmax-row">
+                <span class="minmax-label">Max</span>
+                <input type="number" id="protein_max" value="35" min="0" max="100" required />
+              </label>
+            </div>
+          </div>
+        </div>
+        <p class="hint">Optimizer targets the midpoint: <strong id="kcal_mid_display">550</strong> kcal</p>
+      </section>
+
+      <button type="submit" id="submit-btn">Find recipe</button>
+    </form>
+
+    <section id="progress" class="panel hidden">
+      <h2>Pipeline progress</h2>
+      <ul id="timeline"></ul>
+      <div id="stage-detail"></div>
+      <div id="active-step" class="active-step hidden" aria-live="polite"></div>
+      <div id="progress-scroll-anchor" class="scroll-anchor" aria-hidden="true"></div>
+    </section>
+
+    <section id="result" class="panel hidden">
+      <h2>Selected recipe</h2>
+      <div id="result-summary"></div>
+      <div id="result-ingredients"></div>
+      <div id="result-explanation"></div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

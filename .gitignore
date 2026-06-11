@@ -4,6 +4,7 @@
 Data/
 *__pycache__/
 .cursor/
+mvp_web/cache/
 .pip_packages/
 
 # MLflow local tracking + artifact stores

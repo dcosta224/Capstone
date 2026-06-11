@@ -1,0 +1,15 @@
+-- Recipe-level nutrient totals (wide table).
+-- Full column list is generated at load time from usda.nutrient by load_recipe_nutrients.py.
+-- This file documents the fixed core columns only.
+
+-- Example after loader runs:
+-- CREATE TABLE recipe.recipe_nutrients (
+--     recipe_id         bigint PRIMARY KEY,
+--     recipe_name       text NOT NULL,
+--     n_ingredients     integer,
+--     total_gram_weight double precision,
+--     energy_kcal       double precision,
+--     protein_g         double precision,
+--     ...
+--     loaded_at         timestamptz DEFAULT now()
+-- );
