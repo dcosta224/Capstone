@@ -388,6 +388,18 @@ v4 run artifacts (local, not in git): `scratch/EDA/portion_feasibility_1000_v4_n
 
 ---
 
+## AWS deploy (optional)
+
+Local dev on your Mac; S3 for datasets/artifacts; on-demand EC2 for staging demos.
+See **[docs/AWS_WORKFLOW.md](docs/AWS_WORKFLOW.md)** for costs, partner workflow, and commands.
+
+```bash
+./infra/aws/bootstrap.sh --s3-only    # S3 buckets only (no EC2 cost)
+./scripts/deploy/load_to_s3.sh --all  # upload Data/ + artifacts
+```
+
+---
+
 ## License & attribution
 
 - USDA FoodData Central — U.S. Department of Agriculture  

@@ -6,6 +6,7 @@ import json
 import queue
 import sys
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -23,14 +24,17 @@ from mvp_pipeline import PipelineEvent, UserQuery, get_embedding_model, run_pipe
 
 load_dotenv()
 
-app = FastAPI(title="Recipe MVP", version="0.1.0")
 
-
-@app.on_event("startup")
-def startup_warm_cache() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     """Preload corpus + embedding model so demo requests stay fast."""
     warm_mvp_corpus()
     get_embedding_model()
+    yield
+
+
+app = FastAPI(title="Recipe MVP", version="0.1.0", lifespan=lifespan)
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -134,3 +138,9 @@ def recommend(req: RecommendRequest):
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)
