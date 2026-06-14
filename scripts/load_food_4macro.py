@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -9,7 +10,8 @@ import pandas as pd
 from db import connect
 
 ROOT = Path(__file__).resolve().parents[1]
-CACHE_PATH = ROOT / "scratch" / "food_4macro.csv"
+_DEFAULT_CACHE = ROOT / "scratch" / "food_4macro.csv"
+CACHE_PATH = Path(os.environ.get("FOOD_4MACRO_CACHE", _DEFAULT_CACHE))
 
 FOOD_4MACRO_SQL = """
 SELECT

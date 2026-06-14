@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import pickle
 import time
 import uuid
@@ -884,6 +885,8 @@ def run_feasibility(
     only_no_portion: bool = False,
     use_mlflow: bool = True,
     mlflow_experiment: str = DEFAULT_EXPERIMENT,
+    sample_manifest: Path | None = None,
+    recipe_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     load_dotenv()
     baseline_dir_resolved, write_dir = resolve_run_dirs(
@@ -910,7 +913,11 @@ def run_feasibility(
     if force_all and not finalize_only and not only_no_portion:
         _clear_phase_caches(paths)
 
-    recipes, recipe_ingredients, sampled_ids = load_sampled_recipes(n=n_recipes, seed=seed)
+    recipes, recipe_ingredients, sampled_ids = load_sampled_recipes(
+        n=n_recipes,
+        seed=seed,
+        sample_manifest=sample_manifest,
+    )
     if limit is not None:
         recipe_ingredients = recipe_ingredients.head(limit)
 
@@ -979,9 +986,10 @@ def run_feasibility(
         for r in recipes.itertuples(index=False)
     }
 
+    _recipe_cache = recipe_cache_dir or paths["amount"].parent / "recipe_cache"
     parsed, name_emb, prep_emb, dequant_emb, _ = load_or_build_recipe_artifacts(
         recipe_ingredients,
-        paths["amount"].parent / "recipe_cache",
+        _recipe_cache,
         force=force_all and not only_no_portion,
     )
 
@@ -1176,6 +1184,18 @@ def main() -> None:
         default=DEFAULT_EXPERIMENT,
         help=f"MLflow experiment name (default: {DEFAULT_EXPERIMENT})",
     )
+    parser.add_argument(
+        "--sample-manifest",
+        type=Path,
+        default=None,
+        help="JSON manifest with recipe_ids (Colab canonical 1000-recipe sample)",
+    )
+    parser.add_argument(
+        "--recipe-cache-dir",
+        type=Path,
+        default=None,
+        help="Pre-built recipe embedding cache (or set CAPSTONE_RECIPE_CACHE)",
+    )
     args = parser.parse_args()
 
     out = args.out_dir
@@ -1185,6 +1205,10 @@ def main() -> None:
     baseline = args.baseline_dir
     if args.only_no_portion and baseline is None:
         baseline = DEFAULT_BASELINE
+
+    recipe_cache = args.recipe_cache_dir
+    if recipe_cache is None and os.environ.get("CAPSTONE_RECIPE_CACHE"):
+        recipe_cache = Path(os.environ["CAPSTONE_RECIPE_CACHE"])
 
     run_feasibility(
         n_recipes=args.n_recipes,
@@ -1204,6 +1228,8 @@ def main() -> None:
         only_no_portion=args.only_no_portion,
         use_mlflow=not args.no_mlflow,
         mlflow_experiment=args.mlflow_experiment,
+        sample_manifest=args.sample_manifest,
+        recipe_cache_dir=recipe_cache,
     )
 
 

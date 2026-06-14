@@ -400,6 +400,16 @@ See **[docs/AWS_WORKFLOW.md](docs/AWS_WORKFLOW.md)** for costs, partner workflow
 
 ---
 
+## Colab OSS pipeline (optional)
+
+Run the full 1,000-recipe feasibility pipeline on Google Colab with an open-source HF model (no OpenAI).
+
+1. Export input bundle locally: `uv run python scripts/export_colab_s3_bundle.py`
+2. Open [`notebooks/colab_ingredient_resolution_oss.ipynb`](notebooks/colab_ingredient_resolution_oss.ipynb) in Colab
+3. See **[docs/COLAB_OSS_RESOLUTION.md](docs/COLAB_OSS_RESOLUTION.md)** for secrets, S3 paths, and troubleshooting
+
+---
+
 ## License & attribution
 
 - USDA FoodData Central — U.S. Department of Agriculture  
