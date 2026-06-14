@@ -388,6 +388,31 @@ v4 run artifacts (local, not in git): `scratch/EDA/portion_feasibility_1000_v4_n
 
 ---
 
+## MVP web app + Strands agent
+
+Interactive recipe recommendation UI backed by the MVP corpus (106 fully gram-resolved recipes).
+
+```bash
+uv run uvicorn mvp_web.server:app --reload --port 8000
+```
+
+Open `http://127.0.0.1:8000`. The `/api/recommend` endpoint streams SSE stages (`embed_query` → `stage1_rank` → `optimize` → `judge` → `format_result`).
+
+**Strands agent (default on `agent_mvp`):** Bedrock (Nova Lite) orchestrates five pipeline tools; OpenAI `gpt-4o-mini` still runs the final judge step.
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `MVP_AGENT_ENABLED` | `1` | Use Strands agent (`0` = legacy `run_pipeline`) |
+| `AWS_REGION` | `us-east-1` | Bedrock region |
+| `BEDROCK_MODEL_ID` | `us.amazon.nova-lite-v1:0` | Orchestrator model |
+| `OPENAI_API_KEY` | — | Judge tool |
+
+Requires `aws login` (or `AWS_PROFILE`) with Bedrock `InvokeModel` access. If the agent stops early, a deterministic tool fallback completes the pipeline.
+
+Agent code: `mvp_agent/` (`tools.py`, `runner.py`, `context.py`).
+
+---
+
 ## AWS deploy (optional)
 
 Local dev on your Mac; S3 for datasets/artifacts; on-demand EC2 for staging demos.
