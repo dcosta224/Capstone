@@ -313,9 +313,9 @@ def load_or_classify_amounts(
     amount_df, amount_llm_df, summary = classify_ingredient_lines(
         recipe_ingredients, model=model
     )
-    amount_df.to_parquet(paths["amount"], index=False)
+    safe_to_parquet(amount_df, paths["amount"], index=False)
     if not amount_llm_df.empty:
-        amount_llm_df.to_parquet(paths["amount_llm"], index=False)
+        safe_to_parquet(amount_llm_df, paths["amount_llm"], index=False)
     write_manifest(paths["amount"].parent, manifest)
     print(f"Amount classification: {summary}", flush=True)
     return amount_df, amount_llm_df, summary
@@ -334,6 +334,23 @@ def _fdc_has_classifiable_portion(
     if amount_kind == "count":
         return fid in count_fdc_ids
     return False
+
+def safe_to_parquet(df: pd.DataFrame, path: Path, *, index: bool = False) -> None:
+    """Write parquet safely when object columns contain dict/list values.
+
+    PyArrow can fail on empty dict columns, such as an all-empty
+    enrichment column, because it infers a struct with no child fields.
+    JSON-serializing dict/list cells keeps the cache portable.
+    """
+    out = df.copy()
+
+    for col in out.columns:
+        if out[col].map(lambda x: isinstance(x, (dict, list))).any():
+            out[col] = out[col].apply(
+                lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x
+            )
+
+    out.to_parquet(path, index=index)
 
 
 def apply_portion_llm_pass(
@@ -849,7 +866,7 @@ def run_judging_cached(
         df = pd.concat([base_df, new_df], ignore_index=True)
     else:
         df = new_df
-    df.to_parquet(cache_path, index=False)
+    safe_to_parquet(df, cache_path, index=False)
     manifest["only_no_portion"] = only_no_portion
     write_manifest(paths["judge_raw"].parent, manifest)
     n_ok = df["llm_fdc_id"].notna().sum()
@@ -1116,7 +1133,7 @@ def run_feasibility(
                     portion_rows_cache=portion_rows_cache,
                 )
 
-    matches_df.to_parquet(paths["matches"], index=False)
+    safe_to_parquet(matches_df, paths["matches"], index=False)
     write_manifest(write_dir, manifest)
 
     report = build_feasibility_report(amount_df, matches_df, amount_summary=amount_summary)
