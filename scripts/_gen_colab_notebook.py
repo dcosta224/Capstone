@@ -87,6 +87,19 @@ def probe_memory() -> dict[str, Any]:
     else:
         cfg["embed_batch"] = 0  # use pre-built S3 embeddings only
 
+    min_parallel = int(os.environ.get("COLAB_MIN_BATCH", "8"))
+    if cfg["backend"] == "vllm":
+        cfg["vllm_max_num_seqs"] = max(min_parallel, cfg["vllm_max_num_seqs"])
+        cfg["judge_concurrency"] = max(min_parallel, cfg["judge_concurrency"])
+    elif vram >= 14:
+        cfg["judge_concurrency"] = max(min_parallel, cfg["judge_concurrency"])
+    elif min_parallel > cfg["judge_concurrency"]:
+        print(
+            f"WARNING: GPU VRAM {vram:.1f}GB — judge concurrency stays at "
+            f"{cfg['judge_concurrency']} (set COLAB_MIN_BATCH lower or use A100 + vLLM for 8+)",
+            flush=True,
+        )
+
     return cfg
 
 
@@ -258,7 +271,17 @@ try:
     OSS_LLM = OssJsonLlm(DEFAULT_MODEL, PROBE)
 except Exception as exc:
     print(f"OOM loading {DEFAULT_MODEL}: {exc}; trying {FALLBACK_MODEL}")
-    PROBE["judge_concurrency"] = min(PROBE.get("judge_concurrency", 4), 4)
+    min_parallel = int(os.environ.get("COLAB_MIN_BATCH", "8"))
+    if PROBE.get("vram_gb", 0) >= 38:
+        PROBE["judge_concurrency"] = max(min_parallel, PROBE.get("judge_concurrency", min_parallel))
+        if PROBE.get("backend") == "vllm":
+            PROBE["vllm_max_num_seqs"] = max(min_parallel, PROBE.get("vllm_max_num_seqs", min_parallel))
+    else:
+        PROBE["judge_concurrency"] = min(PROBE.get("judge_concurrency", 4), 4)
+        print(
+            "WARNING: 7B fallback on small GPU — concurrency may be below COLAB_MIN_BATCH",
+            flush=True,
+        )
     OSS_LLM = OssJsonLlm(FALLBACK_MODEL, PROBE)
 
 # Warmup: 3 short JSON calls
@@ -472,6 +495,12 @@ prl.pick_portion_sync = oss_pick_portion_sync
 
 limit = int(os.environ["COLAB_LIMIT"]) if os.environ.get("COLAB_LIMIT") else None
 model_label = OSS_LLM.model_id
+min_parallel = int(os.environ.get("COLAB_MIN_BATCH", "8"))
+judge_concurrency = max(min_parallel, int(PROBE.get("judge_concurrency", min_parallel)))
+
+bucket = os.environ.get("S3_BUCKET_ARTIFACTS", "")
+if bucket:
+    os.environ["COLAB_PROGRESS_S3_PREFIX"] = f"s3://{bucket}/colab/runs/{RUN_ID}/"
 
 report = run_feasibility(
     n_recipes=1000,
@@ -481,7 +510,7 @@ report = run_feasibility(
     baseline_dir=None,
     food_cache_dir=CACHE / "food_cache",
     limit=limit,
-    concurrency=int(PROBE.get("judge_concurrency", 4)),
+    concurrency=judge_concurrency,
     skip_portion_llm=False,
     force_amount=False,
     force_judging=False,
@@ -490,6 +519,11 @@ report = run_feasibility(
     finalize_only=False,
     only_no_portion=False,
     use_mlflow=False,
+    progress_mode="colab",
+    disk_flush_every=1,
+    judge_log_every=1,
+    parquet_compact_every=50,
+    enrichment_concurrency=judge_concurrency,
     sample_manifest=CACHE / "sampled_recipe_ids.json",
     recipe_cache_dir=CACHE / "recipe_cache",
 )
@@ -505,6 +539,25 @@ print(json.dumps({k: report[k] for k in (
 '''.strip() + "\n"
 
 
+MONITOR_PROGRESS = r'''
+# Optional: run this cell in parallel (or poll manually) while the pipeline cell runs.
+import json
+import time
+from pathlib import Path
+
+from IPython.display import clear_output
+
+out_dir = OUT if "OUT" in dir() else Path("/content/capstone_runs")
+print("Watching", out_dir / "progress.json")
+while True:
+    p = out_dir / "progress.json"
+    if p.is_file():
+        clear_output(wait=True)
+        print(json.dumps(json.loads(p.read_text()), indent=2))
+    time.sleep(10)
+'''.strip() + "\n"
+
+
 cells = [
     md(
         "# Colab OSS ingredient resolution pipeline\n\n"
@@ -513,6 +566,18 @@ cells = [
         "**Prerequisites:** Colab GPU runtime (A100 recommended), Supabase credentials, AWS S3 access, "
         "and the input bundle at `s3://{artifacts}/colab/feasibility_1000_seed42/`.\n\n"
         "See [`docs/COLAB_OSS_RESOLUTION.md`](../docs/COLAB_OSS_RESOLUTION.md) for setup."
+    ),
+    md(
+        "## Monitoring progress\n\n"
+        "While the pipeline runs, artifacts are written under `OUT` (`/content/capstone_runs/<RUN_ID>/`):\n\n"
+        "| File | Updates |\n"
+        "|------|--------|\n"
+        "| `progress.json` | Every phase change and every judge row |\n"
+        "| `judge_stream.jsonl` | Append-only full judge row after each inference |\n"
+        "| `judge_matches_raw.parquet` | Compacted every 50 rows (+ final) |\n"
+        "| `phase_log.jsonl` | Phase start/end events |\n\n"
+        "From your Mac (after S3 sync): `aws s3 cp s3://<bucket>/colab/runs/<RUN_ID>/progress.json -`\n\n"
+        "`recipe_ingredients_parsed.parquet` in the recipe cache is **prep only**, not judge progress."
     ),
     code("!nvidia-smi\n!free -h"),
     code(
@@ -580,6 +645,7 @@ cells = [
     ),
     code(OSS_PROBE_AND_MODEL),
     code(PATCH_AND_RUN),
+    code(MONITOR_PROGRESS),
     code(
         "import json\n"
         "import os\n"

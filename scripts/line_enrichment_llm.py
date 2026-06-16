@@ -173,6 +173,7 @@ def run_line_enrichment_sync(
     *,
     model: str = DEFAULT_MODEL,
     concurrency: int = 8,
+    progress_writer: Any = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """Enrich lines that need LLM; items are (ingredient, parse_fields)."""
     from openai_fallback import get_async_openai_client
@@ -191,14 +192,28 @@ def run_line_enrichment_sync(
         client = get_async_openai_client()
         sem = asyncio.Semaphore(concurrency)
         results: list[dict[str, Any]] = []
+        total = len(unique)
+        done = 0
 
         async def _one(key: str):
+            nonlocal done
             async with sem:
                 raw, plan = unique[key]
-                return await enrich_one_async(client, model, raw, plan)
+                row = await enrich_one_async(client, model, raw, plan)
+                done += 1
+                if progress_writer is not None:
+                    progress_writer.record_enrichment_row(
+                        done=done,
+                        total=total,
+                        ingredient_norm=key,
+                        error=row.get("error"),
+                    )
+                return row
 
-        tasks = [_one(k) for k in unique]
-        return await asyncio.gather(*tasks)
+        tasks = [asyncio.create_task(_one(k)) for k in unique]
+        for fut in asyncio.as_completed(tasks):
+            results.append(await fut)
+        return results
 
     rows = asyncio.run(_run()) if unique else []
     cache = {r["ingredient_norm"]: r for r in rows}

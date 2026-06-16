@@ -119,6 +119,7 @@ def precompute_payloads_portion(
     *,
     limit: int | None = None,
     chunk_size: int = 256,
+    progress_writer: Any = None,
 ) -> list[dict[str, Any]]:
     n = len(parsed) if limit is None else min(limit, len(parsed))
     payloads: list[dict[str, Any]] = []
@@ -180,6 +181,8 @@ def precompute_payloads_portion(
                     f"{str(row_peek.get('ingredient', ''))[:80]!r}",
                     flush=True,
                 )
+                if progress_writer is not None:
+                    progress_writer.record_chunk_progress("payloads", i + 1, n)
             row = parsed.iloc[i]
             row_dict = row.to_dict()
             recipe_id = int(row["recipe_id"])

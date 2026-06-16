@@ -47,6 +47,7 @@ from feasibility_mlflow import (
     log_feasibility_run,
     next_feasibility_version,
 )
+from feasibility_progress import FeasibilityProgressWriter
 from ingredient_match_llm import (
     DEFAULT_MODEL,
     MODEL_PRICING,
@@ -199,6 +200,8 @@ def classify_ingredient_lines(
     recipe_ingredients: pd.DataFrame,
     *,
     model: str,
+    progress_writer: Any = None,
+    enrichment_concurrency: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Rules parse + resolution plan; selective LLM line enrichment."""
     rows: list[dict[str, Any]] = []
@@ -228,7 +231,12 @@ def classify_ingredient_lines(
     llm_cache: dict[str, dict[str, Any]] = {}
     llm_log: list[dict[str, Any]] = []
     if enrich_items:
-        llm_cache, llm_log = run_line_enrichment_sync(enrich_items, model=model)
+        llm_cache, llm_log = run_line_enrichment_sync(
+            enrich_items,
+            model=model,
+            concurrency=enrichment_concurrency,
+            progress_writer=progress_writer,
+        )
 
     final_rows: list[dict[str, Any]] = []
     for r in rows:
@@ -285,6 +293,8 @@ def load_or_classify_amounts(
     manifest: dict[str, Any],
     force: bool,
     only_no_portion: bool = False,
+    progress_writer: Any = None,
+    enrichment_concurrency: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     saved = load_manifest(paths["amount"].parent)
     if (
@@ -311,7 +321,10 @@ def load_or_classify_amounts(
         return amount_df, amount_llm_df, summary
 
     amount_df, amount_llm_df, summary = classify_ingredient_lines(
-        recipe_ingredients, model=model
+        recipe_ingredients,
+        model=model,
+        progress_writer=progress_writer,
+        enrichment_concurrency=enrichment_concurrency,
     )
     amount_df.to_parquet(paths["amount"], index=False)
     if not amount_llm_df.empty:
@@ -343,11 +356,16 @@ def apply_portion_llm_pass(
     conn,
     model: str,
     portion_rows_cache: dict[int, list[dict[str, Any]]] | None = None,
+    progress_writer: Any = None,
 ) -> pd.DataFrame:
     """LLM portion pick where rules returned no_portion."""
+    from datetime import datetime, timezone
+
     out = matches_df.copy()
     n_picks = 0
     n_rescued = 0
+    if progress_writer is not None:
+        progress_writer.set_phase("portion_llm")
 
     for i, row in out.iterrows():
         if not bool(row.get("needs_portion")):
@@ -383,6 +401,12 @@ def apply_portion_llm_pass(
             raw_rows=raw_rows,
         )
         n_picks += 1
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        print(
+            f"[portion_llm {n_picks}] {ts} r{int(row['recipe_id'])}#{int(row['ingredient_idx'])} "
+            f"{str(row['ingredient'])[:40]!r}",
+            flush=True,
+        )
         out.at[i, "portion_llm_certainty"] = llm_meta.get("certainty")
         out.at[i, "portion_llm_rationale"] = llm_meta.get("rationale")
 
@@ -770,6 +794,10 @@ def run_judging_cached(
     only_no_portion: bool = False,
     baseline_paths: dict[str, Path] | None = None,
     total_dataset_lines: int | None = None,
+    disk_flush_every: int = 100,
+    judge_log_every: int = 25,
+    heartbeat_sec: float = 15.0,
+    progress_writer: Any = None,
 ) -> pd.DataFrame:
     saved = load_manifest(paths["judge_raw"].parent)
     cache_path = paths["judge_raw"]
@@ -839,17 +867,30 @@ def run_judging_cached(
             assemble_fn=assemble_rows_portion,
             system_prompt=SYSTEM_PROMPT,
             disk_checkpoint_path=cache_path,
-            disk_flush_every=100,
+            disk_flush_every=disk_flush_every,
+            log_every=judge_log_every,
+            heartbeat_sec=heartbeat_sec,
             total_dataset_lines=total_dataset_lines or manifest.get("n_lines"),
+            progress_writer=progress_writer,
         )
     )
 
-    new_df = pd.DataFrame(all_exp)
-    if only_no_portion and not base_df.empty:
-        df = pd.concat([base_df, new_df], ignore_index=True)
+    if progress_writer is not None:
+        new_df = pd.DataFrame(all_exp)
+        if only_no_portion and not base_df.empty:
+            df = pd.concat([base_df, new_df], ignore_index=True)
+        elif new_df.empty:
+            df = load_judge_checkpoint(cache_path)
+        else:
+            df = new_df
+        df.to_parquet(cache_path, index=False)
     else:
-        df = new_df
-    df.to_parquet(cache_path, index=False)
+        new_df = pd.DataFrame(all_exp)
+        if only_no_portion and not base_df.empty:
+            df = pd.concat([base_df, new_df], ignore_index=True)
+        else:
+            df = new_df
+        df.to_parquet(cache_path, index=False)
     manifest["only_no_portion"] = only_no_portion
     write_manifest(paths["judge_raw"].parent, manifest)
     n_ok = df["llm_fdc_id"].notna().sum()
@@ -884,6 +925,13 @@ def run_feasibility(
     only_no_portion: bool = False,
     use_mlflow: bool = True,
     mlflow_experiment: str = DEFAULT_EXPERIMENT,
+    progress_mode: str = "default",
+    disk_flush_every: int = 100,
+    judge_log_every: int = 25,
+    parquet_compact_every: int = 50,
+    enrichment_concurrency: int = 8,
+    sample_manifest: Path | None = None,
+    recipe_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     load_dotenv()
     baseline_dir_resolved, write_dir = resolve_run_dirs(
@@ -895,6 +943,18 @@ def run_feasibility(
     paths = _paths(write_dir)
     baseline_paths = _paths(baseline_dir_resolved)
     t0 = time.perf_counter()
+
+    progress_writer: FeasibilityProgressWriter | None = None
+    if progress_mode == "colab":
+        progress_writer = FeasibilityProgressWriter(
+            write_dir,
+            run_id=write_dir.name,
+            parquet_compact_every=parquet_compact_every,
+            s3_sync_every=parquet_compact_every,
+        )
+        heartbeat_sec = 10.0
+    else:
+        heartbeat_sec = 15.0
 
     if only_no_portion:
         print(
@@ -910,7 +970,11 @@ def run_feasibility(
     if force_all and not finalize_only and not only_no_portion:
         _clear_phase_caches(paths)
 
-    recipes, recipe_ingredients, sampled_ids = load_sampled_recipes(n=n_recipes, seed=seed)
+    recipes, recipe_ingredients, sampled_ids = load_sampled_recipes(
+        n=n_recipes,
+        seed=seed,
+        sample_manifest=sample_manifest,
+    )
     if limit is not None:
         recipe_ingredients = recipe_ingredients.head(limit)
 
@@ -934,6 +998,8 @@ def run_feasibility(
             flush=True,
         )
 
+    if progress_writer is not None:
+        progress_writer.set_phase("sample_load", total=len(recipe_ingredients))
     print(f"Loaded {len(recipes)} recipes, {len(recipe_ingredients)} ingredient lines", flush=True)
 
     if finalize_only:
@@ -965,6 +1031,8 @@ def run_feasibility(
             },
         )
 
+    if progress_writer is not None:
+        progress_writer.set_phase("amount_classify", total=len(recipe_ingredients))
     amount_df, amount_llm_df, amount_summary = load_or_classify_amounts(
         recipe_ingredients,
         model=model,
@@ -972,8 +1040,12 @@ def run_feasibility(
         manifest=manifest,
         force=force_amount,
         only_no_portion=only_no_portion,
+        progress_writer=progress_writer,
+        enrichment_concurrency=enrichment_concurrency,
     )
 
+    if progress_writer is not None:
+        progress_writer.set_phase("recipe_artifacts")
     directions_by_recipe = {
         int(r.recipe_id): parse_directions_list(r.directions)
         for r in recipes.itertuples(index=False)
@@ -1048,6 +1120,11 @@ def run_feasibility(
                 flush=True,
             )
         if payloads is None:
+            if progress_writer is not None:
+                progress_writer.set_phase(
+                    "payloads",
+                    total=len(parsed_for_payloads) if limit is None else min(limit, len(parsed_for_payloads)),
+                )
             payloads = precompute_payloads_portion(
                 parsed_for_payloads,
                 name_emb_p,
@@ -1061,10 +1138,13 @@ def run_feasibility(
                 count_index,
                 portion_summary_index,
                 limit=limit,
+                progress_writer=progress_writer,
             )
             _save_payloads(paths, payloads)
             write_manifest(write_dir, manifest)
 
+        if progress_writer is not None:
+            progress_writer.set_phase("judging", total=len(payloads))
         matches_df = run_judging_cached(
             payloads,
             model=model,
@@ -1075,12 +1155,18 @@ def run_feasibility(
             only_no_portion=only_no_portion,
             baseline_paths=baseline_paths if only_no_portion else None,
             total_dataset_lines=len(recipe_ingredients),
+            disk_flush_every=disk_flush_every,
+            judge_log_every=judge_log_every,
+            heartbeat_sec=heartbeat_sec,
+            progress_writer=progress_writer,
         )
         matches_df = attach_amount_fields(matches_df, amount_df)
 
         portion_rows_cache: dict[int, list[dict[str, Any]]] | None = None
         needs_enrich = "rules_grams" not in matches_df.columns
         if needs_enrich or force_judging or force_amount or force_all:
+            if progress_writer is not None:
+                progress_writer.set_phase("rules_grams")
             matched_fdc_ids = {
                 int(x)
                 for x in matches_df["llm_fdc_id"].dropna().unique()
@@ -1114,12 +1200,17 @@ def run_feasibility(
                     conn=conn,
                     model=model,
                     portion_rows_cache=portion_rows_cache,
+                    progress_writer=progress_writer,
                 )
 
+    if progress_writer is not None:
+        progress_writer.set_phase("report")
     matches_df.to_parquet(paths["matches"], index=False)
     write_manifest(write_dir, manifest)
 
     report = build_feasibility_report(amount_df, matches_df, amount_summary=amount_summary)
+    if progress_writer is not None:
+        progress_writer.finalize()
     return _finish_feasibility_run(
         report=report,
         manifest=manifest,

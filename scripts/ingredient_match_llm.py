@@ -549,6 +549,7 @@ async def run_judging(
     disk_checkpoint_path: Any = None,
     disk_flush_every: int = 100,
     total_dataset_lines: int | None = None,
+    progress_writer: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Dispatch concurrent LLM calls; checkpoint in batches; stream observability.
 
@@ -587,6 +588,19 @@ async def run_judging(
     latencies: list[float] = []
     t_start = time.time()
     disk_path = Path(disk_checkpoint_path) if disk_checkpoint_path else None
+    stream_via_writer = progress_writer is not None
+
+    def _inferred_at_str(exp: dict[str, Any]) -> str:
+        raw = exp.get("inferred_at")
+        if raw:
+            return str(raw)
+        ts = exp.get("ts")
+        if hasattr(ts, "strftime"):
+            return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts_time = exp.get("ts_time")
+        if ts_time:
+            return str(ts_time)
+        return ""
 
     def agg_line(tag: str) -> str:
         done = stats["done"]
@@ -705,17 +719,27 @@ async def run_judging(
                 flag = "OK" if exp["llm_error"] is None else f"ERR:{exp['llm_error']}"
                 mark = "=" if exp["llm_agrees_with_staged"] else ("~" if pick is not None else "X")
                 ing = exp["ingredient"][:34]
+                ts_label = _inferred_at_str(exp)
+                ts_prefix = f"{ts_label} " if ts_label else ""
                 print(
-                    f"[{stats['done']:>4}/{total}] r{exp['recipe_id']}#{exp['ingredient_idx']} "
+                    f"[{stats['done']:>4}/{total}] {ts_prefix}"
+                    f"r{exp['recipe_id']}#{exp['ingredient_idx']} "
                     f"{ing!r:36} -> {str(pick):>8} {mark} cert={exp['llm_certainty']} "
                     f"{judge.get('latency_sec', 0.0):.2f}s {flag}",
                     flush=True,
                 )
 
+            if progress_writer is not None:
+                progress_writer.record_judge_row(exp)
+
             if stats["done"] % log_every == 0:
                 print(agg_line(">>"), flush=True)
 
-            if disk_path and len(buf_exp) >= disk_flush_every:
+            if (
+                disk_path
+                and not stream_via_writer
+                and len(buf_exp) >= disk_flush_every
+            ):
                 await loop.run_in_executor(None, flush_disk, list(buf_exp))
                 stats["checkpointed"] += len(buf_exp)
                 buf_exp.clear()
@@ -756,9 +780,12 @@ async def run_judging(
                     print("  [budget] BREAKER TRIPPED — halting new LLM calls, "
                           "draining in-flight requests…", flush=True)
 
-        if disk_path and buf_exp:
+        if disk_path and buf_exp and not stream_via_writer:
             await loop.run_in_executor(None, flush_disk, list(buf_exp))
             stats["checkpointed"] += len(buf_exp)
+
+        if progress_writer is not None:
+            progress_writer.compact_parquet()
 
         if use_supabase and buf_exp:
             await loop.run_in_executor(db_executor, flush, list(buf_exp), list(buf_cand))

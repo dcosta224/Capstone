@@ -63,6 +63,7 @@ Optional:
 |----------|---------|---------|
 | `OSS_MODEL_ID` | `Qwen/Qwen2.5-14B-Instruct` | HF model for all LLM calls |
 | `COLAB_LIMIT` | (none) | Smoke test: limit ingredient lines (e.g. `100`) |
+| `COLAB_MIN_BATCH` | `8` | Minimum parallel judge batch size |
 
 **Not needed:** `OPENAI_API_KEY`, MLflow.
 
@@ -83,10 +84,40 @@ The notebook:
 6. Calls `run_feasibility(n_recipes=1000, seed=42, use_mlflow=False, ...)`.
 7. Uploads outputs to S3.
 
+## Monitoring progress during a run
+
+While `run_feasibility` runs, artifacts are written under `/content/capstone_runs/<RUN_ID>/`:
+
+| File | Updates |
+|------|---------|
+| `progress.json` | Every phase change and every judge inference |
+| `judge_stream.jsonl` | Full judge row appended after **each** inference |
+| `judge_matches_raw.parquet` | Compacted from JSONL every 50 rows (+ at end) |
+| `phase_log.jsonl` | Phase start/end events |
+
+Poll from Colab (optional monitor cell) or from your Mac after periodic S3 sync:
+
+```bash
+aws s3 cp s3://{S3_BUCKET_ARTIFACTS}/colab/runs/{run_id}/progress.json -
+wc -l <(aws s3 cp s3://.../judge_stream.jsonl - 2>/dev/null)   # judge rows completed
+```
+
+**Not judge progress:** `recipe_cache/recipe_ingredients_parsed.parquet` is embedding prep (always ~8,754 lines for the full sample).
+
+Optional env vars:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `COLAB_MIN_BATCH` | `8` | Minimum `judge_concurrency` and vLLM `max_num_seqs` on A100 |
+| `COLAB_PROGRESS_S3_PREFIX` | (set by notebook) | `aws s3 cp` progress files during the run |
+
 ## S3 output layout
 
 ```
 s3://{S3_BUCKET_ARTIFACTS}/colab/runs/{run_id}/
+  progress.json
+  judge_stream.jsonl
+  phase_log.jsonl
   run_manifest.json
   feasibility_report.json
   amount_classification.parquet
@@ -101,8 +132,8 @@ Compare `feasibility_report.json` to `baseline_summary.json` from the input bund
 
 | Backend | When | `judge_concurrency` |
 |---------|------|---------------------|
-| **vLLM** (preferred) | A100 40GB+ | 8 (up to 12 on 80GB) |
-| **transformers + 4-bit** | vLLM install fails or smaller GPU | 2–4 |
+| **vLLM** (preferred) | A100 40GB+ | **≥ 8** (up to 12 on 80GB; `COLAB_MIN_BATCH`) |
+| **transformers + 4-bit** | vLLM install fails | **≥ 8** on 14GB+ VRAM; 2 on T4 |
 
 Default model: **Qwen/Qwen2.5-14B-Instruct** (NF4 4-bit). OOM → **Qwen/Qwen2.5-7B-Instruct**.
 
