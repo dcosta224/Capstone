@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# MVP image: CPU-only PyTorch (no CUDA/NVIDIA wheels). See pyproject.toml [tool.uv.sources].
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 

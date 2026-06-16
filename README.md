@@ -420,12 +420,19 @@ Agent code: `mvp_agent/` (`tools.py`, `runner.py`, `context.py`).
 
 | Group | Packages | Used by |
 |-------|----------|---------|
-| **MVP runtime** (`project.dependencies`) | fastapi, uvicorn, numpy, pandas, sentence-transformers, cvxpy, openai, boto3, strands-agents, psycopg2-binary, pgvector | `mvp_web/`, `mvp_agent/`, `scripts/mvp_*.py` |
+| **MVP runtime** (`project.dependencies`) | fastapi, uvicorn, numpy, pandas, sentence-transformers, torch (CPU), cvxpy, openai, boto3, strands-agents, psycopg2-binary, pgvector | `mvp_web/`, `mvp_agent/`, `scripts/mvp_*.py` |
 | **notebook** extra | ipykernel, nbformat, matplotlib, plotly | Jupyter notebooks |
 | **pipeline** extra | mlflow, faiss-cpu, scikit-learn, pyarrow, pdfplumber, … | Batch loaders, EDA, feasibility scripts |
 | **dev** extra | pytest | Unit tests |
 
 ### Docker
+
+CPU-only PyTorch (no CUDA/NVIDIA wheels). Build and push to ECR:
+
+```bash
+chmod +x scripts/deploy/push_mvp_ecr.sh
+./scripts/deploy/push_mvp_ecr.sh
+```
 
 Build and run locally (requires `.env` with Supabase credentials):
 
