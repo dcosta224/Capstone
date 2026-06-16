@@ -284,16 +284,13 @@ except Exception as exc:
         )
     OSS_LLM = OssJsonLlm(FALLBACK_MODEL, PROBE)
 
-# Warmup: 3 short JSON calls
-for i in range(3):
-    r = OSS_LLM.generate_json(
-        "You output JSON only.",
-        f'Return {{"ok": true, "n": {i}}}',
-        max_new_tokens=64,
-    )
-    print("warmup", i, r.parsed)
-
-print("OSS backend ready:", json.dumps(OSS_LLM.meta(), indent=2))
+# Warmup: one short JSON call (validates backend without noisy multi-call output)
+_r = OSS_LLM.generate_json(
+    "You output JSON only.",
+    'Return {"ok": true}',
+    max_new_tokens=64,
+)
+print("OSS backend ready:", OSS_LLM.backend, OSS_LLM.model_id)
 '''.strip() + "\n"
 
 
@@ -309,7 +306,6 @@ import ingredient_match_llm as iml
 import line_enrichment_llm as lel
 import portion_resolve_llm as prl
 import openai_fallback
-import sample_recipes
 from portion_pipeline_feasibility import run_feasibility
 
 CACHE = Path("/content/capstone_cache")
@@ -319,9 +315,6 @@ RUN_ID = OUT.name
 
 os.environ["FOOD_4MACRO_CACHE"] = str(CACHE / "food_4macro.csv")
 os.environ["CAPSTONE_RECIPE_CACHE"] = str(CACHE / "recipe_cache")
-
-recipe_csv = CACHE / "RecipeNLG.csv"
-sample_recipes.DEFAULT_RECIPE_CSV = recipe_csv
 
 # Dummy OpenAI clients (unused after patches)
 class _Dummy:
@@ -502,6 +495,11 @@ bucket = os.environ.get("S3_BUCKET_ARTIFACTS", "")
 if bucket:
     os.environ["COLAB_PROGRESS_S3_PREFIX"] = f"s3://{bucket}/colab/runs/{RUN_ID}/"
 
+recipe_csv = CACHE / "RecipeNLG.csv"
+
+import nest_asyncio
+nest_asyncio.apply()
+
 report = run_feasibility(
     n_recipes=1000,
     seed=42,
@@ -520,11 +518,12 @@ report = run_feasibility(
     only_no_portion=False,
     use_mlflow=False,
     progress_mode="colab",
-    disk_flush_every=1,
-    judge_log_every=1,
-    parquet_compact_every=50,
+    disk_flush_every=10,
+    judge_log_every=10_000,
+    parquet_compact_every=10,
     enrichment_concurrency=judge_concurrency,
     sample_manifest=CACHE / "sampled_recipe_ids.json",
+    recipe_csv=recipe_csv,
     recipe_cache_dir=CACHE / "recipe_cache",
 )
 
@@ -539,25 +538,6 @@ print(json.dumps({k: report[k] for k in (
 '''.strip() + "\n"
 
 
-MONITOR_PROGRESS = r'''
-# Optional: run this cell in parallel (or poll manually) while the pipeline cell runs.
-import json
-import time
-from pathlib import Path
-
-from IPython.display import clear_output
-
-out_dir = OUT if "OUT" in dir() else Path("/content/capstone_runs")
-print("Watching", out_dir / "progress.json")
-while True:
-    p = out_dir / "progress.json"
-    if p.is_file():
-        clear_output(wait=True)
-        print(json.dumps(json.loads(p.read_text()), indent=2))
-    time.sleep(10)
-'''.strip() + "\n"
-
-
 cells = [
     md(
         "# Colab OSS ingredient resolution pipeline\n\n"
@@ -568,23 +548,37 @@ cells = [
         "See [`docs/COLAB_OSS_RESOLUTION.md`](../docs/COLAB_OSS_RESOLUTION.md) for setup."
     ),
     md(
-        "## Monitoring progress\n\n"
-        "While the pipeline runs, artifacts are written under `OUT` (`/content/capstone_runs/<RUN_ID>/`):\n\n"
-        "| File | Updates |\n"
-        "|------|--------|\n"
-        "| `progress.json` | Every phase change and every judge row |\n"
-        "| `judge_stream.jsonl` | Append-only full judge row after each inference |\n"
-        "| `judge_matches_raw.parquet` | Compacted every 50 rows (+ final) |\n"
-        "| `phase_log.jsonl` | Phase start/end events |\n\n"
-        "From your Mac (after S3 sync): `aws s3 cp s3://<bucket>/colab/runs/<RUN_ID>/progress.json -`\n\n"
-        "`recipe_ingredients_parsed.parquet` in the recipe cache is **prep only**, not judge progress."
+        "## Progress\n\n"
+        "The pipeline cell shows **one tqdm bar** for all LLM prompts. "
+        "`progress.json` under `OUT` updates every 10 prompts with live stats "
+        "(and syncs to S3 when `COLAB_PROGRESS_S3_PREFIX` is set)."
+    ),
+    code(
+        "import os\n"
+        "os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'\n"
+        "os.environ['VLLM_LOGGING_LEVEL'] = 'ERROR'\n"
+        "os.environ['TRANSFORMERS_VERBOSITY'] = 'error'"
     ),
     code("!nvidia-smi\n!free -h"),
     code(
         "%%capture\n"
-        "!pip install -q torch transformers accelerate bitsandbytes vllm sentence-transformers \\\n"
+        "!pip install -q transformers accelerate bitsandbytes sentence-transformers \\\n"
         "  pandas pyarrow psycopg2-binary rapidfuzz ingredient-parser-nlp \\\n"
-        "  faiss-cpu scikit-learn tqdm psutil networkx python-dotenv"
+        "  faiss-cpu scikit-learn tqdm psutil networkx python-dotenv boto3 nest_asyncio"
+    ),
+    code(
+        "%%capture\n"
+        "!pip uninstall -y vllm\n"
+        "!pip install -q vllm==0.23.0 \\\n"
+        "  --extra-index-url https://wheels.vllm.ai/0.23.0/cu129 \\\n"
+        "  --extra-index-url https://download.pytorch.org/whl/cu128"
+    ),
+    code(
+        "import warnings\n"
+        "warnings.filterwarnings('ignore')\n\n"
+        "import torch\n"
+        "from vllm import LLM\n"
+        "print('OK', torch.__version__, torch.version.cuda, torch.cuda.is_available())"
     ),
     code(
         "import os\n"
@@ -608,54 +602,58 @@ cells = [
         "os.environ.setdefault('PG_SSL_MODE', 'require')\n"
         "os.environ.setdefault('AWS_DEFAULT_REGION', 'us-east-1')\n"
         "os.environ.setdefault('OSS_MODEL_ID', 'Qwen/Qwen2.5-14B-Instruct')\n"
-        "# Optional smoke test: os.environ['COLAB_LIMIT'] = '100'\n"
         "print('Secrets loaded. S3 bucket:', os.environ.get('S3_BUCKET_ARTIFACTS'))"
     ),
     code(
         "import sys\n"
         "from pathlib import Path\n\n"
         "REPO = Path('/content/Capstone')\n"
-        "if not REPO.is_dir():\n"
-        "    !git clone https://github.com/dcosta224/Capstone.git /content/Capstone\n"
+        "if REPO.is_dir():\n"
+        "    !cd /content/Capstone && git fetch origin && git checkout agent_mvp && git pull origin agent_mvp\n"
+        "else:\n"
+        "    !git clone -b agent_mvp https://github.com/dcosta224/Capstone.git /content/Capstone\n"
         "%cd /content/Capstone\n"
-        "sys.path.insert(0, str(REPO / 'scripts'))\n"
-        "print('Repo ready:', REPO)"
+        "sys.path.insert(0, str(REPO / 'scripts'))"
     ),
     code(
         "import os\n"
-        "import subprocess\n"
         "from pathlib import Path\n\n"
+        "from colab_s3 import download_s3_file, sync_s3_prefix\n\n"
         "CACHE = Path('/content/capstone_cache')\n"
         "CACHE.mkdir(parents=True, exist_ok=True)\n"
         "bucket = os.environ['S3_BUCKET_ARTIFACTS']\n"
         "raw_bucket = os.environ.get('S3_BUCKET_RAW', '')\n\n"
-        "subprocess.run([\n"
-        "    'aws', 's3', 'sync',\n"
-        "    f's3://{bucket}/colab/feasibility_1000_seed42/', str(CACHE) + '/',\n"
-        "], check=True)\n\n"
+        "sync_s3_prefix(bucket, 'colab/feasibility_1000_seed42/', CACHE)\n\n"
         "recipe_csv = CACHE / 'RecipeNLG.csv'\n"
         "if not recipe_csv.is_file():\n"
         "    if not raw_bucket:\n"
         "        raise SystemExit('Set S3_BUCKET_RAW or place RecipeNLG.csv in the cache')\n"
-        "    subprocess.run([\n"
-        "        'aws', 's3', 'cp',\n"
-        "        f's3://{raw_bucket}/Data/recipes/RecipeNLG.csv', str(recipe_csv),\n"
-        "    ], check=True)\n"
-        "print('Cache:', list(CACHE.iterdir())[:12], '...')"
+        "    download_s3_file(raw_bucket, 'Data/recipes/RecipeNLG.csv', recipe_csv)\n"
+        "print('Cache ready:', len(list(CACHE.iterdir())), 'items')"
+    ),
+    code(
+        "import os\n"
+        "from pathlib import Path\n\n"
+        "src = Path('/content/capstone_cache/RecipeNLG.csv')\n"
+        "dst_dir = Path('/content/Capstone/Data/recipes')\n"
+        "dst_dir.mkdir(parents=True, exist_ok=True)\n"
+        "dst = dst_dir / 'RecipeNLG.csv'\n"
+        "if not src.is_file():\n"
+        "    raise SystemExit('RecipeNLG.csv missing from cache')\n"
+        "if dst.exists() or dst.is_symlink():\n"
+        "    dst.unlink()\n"
+        "os.symlink(src, dst)\n"
+        "print('Linked', dst, '->', src)"
     ),
     code(OSS_PROBE_AND_MODEL),
     code(PATCH_AND_RUN),
-    code(MONITOR_PROGRESS),
     code(
-        "import json\n"
-        "import os\n"
-        "import subprocess\n"
         "from pathlib import Path\n\n"
+        "from colab_s3 import upload_dir_to_s3\n\n"
         "bucket = os.environ['S3_BUCKET_ARTIFACTS']\n"
-        "run_dir = OUT\n"
-        "dest = f's3://{bucket}/colab/runs/{RUN_ID}/'\n"
-        "subprocess.run(['aws', 's3', 'sync', str(run_dir) + '/', dest], check=True)\n"
-        "print('Uploaded to', dest)"
+        "prefix = f'colab/runs/{RUN_ID}/'\n"
+        "upload_dir_to_s3(OUT, bucket, prefix)\n"
+        "print('Uploaded to', f's3://{bucket}/{prefix}')"
     ),
     code(
         "import json\n"

@@ -665,26 +665,28 @@ async def run_judging(
         _, _, rate_all = no_portion_rate(on_disk)
         denom = total_dataset_lines or n_disk
         nop = int(on_disk["grams_status"].eq("no_portion").sum())
-        print(
-            f"  .. checkpointed {len(exp_rows)} rows -> disk "
-            f"(total {n_disk}/{denom}, no_portion {nop / max(denom, 1):.1%})",
-            flush=True,
-        )
+        if verbose:
+            print(
+                f"  .. checkpointed {len(exp_rows)} rows -> disk "
+                f"(total {n_disk}/{denom}, no_portion {nop / max(denom, 1):.1%})",
+                flush=True,
+            )
 
     async def heartbeat():
         try:
             while True:
                 await asyncio.sleep(heartbeat_sec)
-                if stats["done"] < total:
+                if verbose and stats["done"] < total:
                     print(agg_line("  [hb]"), flush=True)
         except asyncio.CancelledError:
             return
 
     tasks = [asyncio.create_task(worker(p)) for p in payloads]
     hb_task = asyncio.create_task(heartbeat())
-    print(f"Dispatched {total} judge tasks @ concurrency {concurrency}; "
-          f"checkpoint every {flush_every}, log every {log_every}, heartbeat {heartbeat_sec:.0f}s",
-          flush=True)
+    if verbose:
+        print(f"Dispatched {total} judge tasks @ concurrency {concurrency}; "
+              f"checkpoint every {flush_every}, log every {log_every}, heartbeat {heartbeat_sec:.0f}s",
+              flush=True)
 
     try:
         for fut in asyncio.as_completed(tasks):
@@ -732,7 +734,7 @@ async def run_judging(
             if progress_writer is not None:
                 progress_writer.record_judge_row(exp)
 
-            if stats["done"] % log_every == 0:
+            if stats["done"] % log_every == 0 and verbose:
                 print(agg_line(">>"), flush=True)
 
             if (
@@ -797,9 +799,10 @@ async def run_judging(
         if db_executor is not None:
             db_executor.shutdown(wait=True)
 
-    print(agg_line("== final"), flush=True)
-    if breaker["skipped"]:
-        print(f"== budget breaker skipped {breaker['skipped']} un-started calls", flush=True)
+    if verbose:
+        print(agg_line("== final"), flush=True)
+        if breaker["skipped"]:
+            print(f"== budget breaker skipped {breaker['skipped']} un-started calls", flush=True)
     return all_exp, all_cand, (breaker if breaker["tripped"] else None)
 
 

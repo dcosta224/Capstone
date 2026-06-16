@@ -86,20 +86,21 @@ The notebook:
 
 ## Monitoring progress during a run
 
-While `run_feasibility` runs, artifacts are written under `/content/capstone_runs/<RUN_ID>/`:
+The pipeline cell shows **one tqdm bar** (stderr) for all LLM prompts. Stdout and warnings are suppressed during the run.
+
+Artifacts under `/content/capstone_runs/<RUN_ID>/`:
 
 | File | Updates |
 |------|---------|
-| `progress.json` | Every phase change and every judge inference |
-| `judge_stream.jsonl` | Full judge row appended after **each** inference |
-| `judge_matches_raw.parquet` | Compacted from JSONL every 50 rows (+ at end) |
+| `progress.json` | Every **10** prompts with live stats (errors, fdc match rate, ETA) |
+| `judge_stream.jsonl` | Full judge row appended after each inference |
+| `judge_matches_raw.parquet` | Compacted every 10 judge rows (+ at end) |
 | `phase_log.jsonl` | Phase start/end events |
 
-Poll from Colab (optional monitor cell) or from your Mac after periodic S3 sync:
+Poll from your Mac after periodic S3 sync:
 
 ```bash
 aws s3 cp s3://{S3_BUCKET_ARTIFACTS}/colab/runs/{run_id}/progress.json -
-wc -l <(aws s3 cp s3://.../judge_stream.jsonl - 2>/dev/null)   # judge rows completed
 ```
 
 **Not judge progress:** `recipe_cache/recipe_ingredients_parsed.parquet` is embedding prep (always ~8,754 lines for the full sample).
@@ -109,7 +110,7 @@ Optional env vars:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `COLAB_MIN_BATCH` | `8` | Minimum `judge_concurrency` and vLLM `max_num_seqs` on A100 |
-| `COLAB_PROGRESS_S3_PREFIX` | (set by notebook) | `aws s3 cp` progress files during the run |
+| `COLAB_PROGRESS_S3_PREFIX` | (set by notebook) | boto3 upload of progress files every 10 prompts |
 
 ## S3 output layout
 

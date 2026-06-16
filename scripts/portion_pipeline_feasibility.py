@@ -33,6 +33,7 @@ import json
 import pickle
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -401,12 +402,15 @@ def apply_portion_llm_pass(
             raw_rows=raw_rows,
         )
         n_picks += 1
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        print(
-            f"[portion_llm {n_picks}] {ts} r{int(row['recipe_id'])}#{int(row['ingredient_idx'])} "
-            f"{str(row['ingredient'])[:40]!r}",
-            flush=True,
-        )
+        if progress_writer is not None:
+            progress_writer.record_portion_llm_pick()
+        else:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            print(
+                f"[portion_llm {n_picks}] {ts} r{int(row['recipe_id'])}#{int(row['ingredient_idx'])} "
+                f"{str(row['ingredient'])[:40]!r}",
+                flush=True,
+            )
         out.at[i, "portion_llm_certainty"] = llm_meta.get("certainty")
         out.at[i, "portion_llm_rationale"] = llm_meta.get("rationale")
 
@@ -430,7 +434,8 @@ def apply_portion_llm_pass(
             out.at[i, "portion_id"] = gram_result.portion_id
             out.at[i, "portion_resolved_by_llm"] = True
 
-    print(f"Portion LLM pass: {n_picks} picks, {n_rescued} rescued", flush=True)
+    if progress_writer is None or not progress_writer.quiet:
+        print(f"Portion LLM pass: {n_picks} picks, {n_rescued} rescued", flush=True)
     return out
 
 
@@ -852,6 +857,9 @@ def run_judging_cached(
     run_id = uuid.uuid4().hex
     run_name = manifest.get("run_name", "feasibility")
     pricing = MODEL_PRICING.get(model, MODEL_PRICING[DEFAULT_MODEL])
+    quiet = bool(progress_writer is not None and getattr(progress_writer, "quiet", False))
+    if progress_writer is not None:
+        progress_writer.add_prompt_budget(len(payloads))
 
     all_exp, _, _ = asyncio.run(
         run_judging(
@@ -872,6 +880,7 @@ def run_judging_cached(
             heartbeat_sec=heartbeat_sec,
             total_dataset_lines=total_dataset_lines or manifest.get("n_lines"),
             progress_writer=progress_writer,
+            verbose=not quiet,
         )
     )
 
@@ -931,6 +940,7 @@ def run_feasibility(
     parquet_compact_every: int = 50,
     enrichment_concurrency: int = 8,
     sample_manifest: Path | None = None,
+    recipe_csv: Path | None = None,
     recipe_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     load_dotenv()
@@ -949,19 +959,24 @@ def run_feasibility(
         progress_writer = FeasibilityProgressWriter(
             write_dir,
             run_id=write_dir.name,
+            quiet=True,
+            flush_every=10,
             parquet_compact_every=parquet_compact_every,
             s3_sync_every=parquet_compact_every,
         )
+        disk_flush_every = 10
+        judge_log_every = max(judge_log_every, 10_000)
         heartbeat_sec = 10.0
     else:
         heartbeat_sec = 15.0
 
     if only_no_portion:
-        print(
-            f"only-no-portion: baseline (read-only) {baseline_dir_resolved}\n"
-            f"              writes -> {write_dir}",
-            flush=True,
-        )
+        if progress_writer is None or not progress_writer.quiet:
+            print(
+                f"only-no-portion: baseline (read-only) {baseline_dir_resolved}\n"
+                f"              writes -> {write_dir}",
+                flush=True,
+            )
         _seed_baseline_artifacts(baseline_paths, paths)
 
     if force_all:
@@ -970,10 +985,83 @@ def run_feasibility(
     if force_all and not finalize_only and not only_no_portion:
         _clear_phase_caches(paths)
 
+    quiet_ctx = (
+        progress_writer.quiet_context()
+        if progress_writer is not None
+        else nullcontext()
+    )
+
+    with quiet_ctx:
+        return _run_feasibility_pipeline(
+            n_recipes=n_recipes,
+            seed=seed,
+            model=model,
+            limit=limit,
+            concurrency=concurrency,
+            skip_portion_llm=skip_portion_llm,
+            force_amount=force_amount,
+            force_judging=force_judging,
+            force_payloads=force_payloads,
+            force_all=force_all,
+            finalize_only=finalize_only,
+            only_no_portion=only_no_portion,
+            use_mlflow=use_mlflow,
+            mlflow_experiment=mlflow_experiment,
+            enrichment_concurrency=enrichment_concurrency,
+            sample_manifest=sample_manifest,
+            recipe_csv=recipe_csv,
+            recipe_cache_dir=recipe_cache_dir,
+            baseline_dir_resolved=baseline_dir_resolved,
+            write_dir=write_dir,
+            paths=paths,
+            baseline_paths=baseline_paths,
+            progress_writer=progress_writer,
+            disk_flush_every=disk_flush_every,
+            judge_log_every=judge_log_every,
+            heartbeat_sec=heartbeat_sec,
+            food_cache_dir=food_cache_dir,
+            t0=t0,
+        )
+
+
+def _run_feasibility_pipeline(
+    *,
+    n_recipes: int,
+    seed: int,
+    model: str,
+    limit: int | None,
+    concurrency: int,
+    skip_portion_llm: bool,
+    force_amount: bool,
+    force_judging: bool,
+    force_payloads: bool,
+    force_all: bool,
+    finalize_only: bool,
+    only_no_portion: bool,
+    use_mlflow: bool,
+    mlflow_experiment: str,
+    enrichment_concurrency: int,
+    sample_manifest: Path | None,
+    recipe_csv: Path | None,
+    recipe_cache_dir: Path | None,
+    baseline_dir_resolved: Path,
+    write_dir: Path,
+    paths: dict[str, Path],
+    baseline_paths: dict[str, Path],
+    progress_writer: FeasibilityProgressWriter | None,
+    disk_flush_every: int,
+    judge_log_every: int,
+    heartbeat_sec: float,
+    food_cache_dir: Path,
+    t0: float,
+) -> dict[str, Any]:
+    from sample_recipes import DEFAULT_RECIPE_CSV, load_sampled_recipes
+
     recipes, recipe_ingredients, sampled_ids = load_sampled_recipes(
         n=n_recipes,
         seed=seed,
         sample_manifest=sample_manifest,
+        recipe_csv=recipe_csv or DEFAULT_RECIPE_CSV,
     )
     if limit is not None:
         recipe_ingredients = recipe_ingredients.head(limit)
@@ -1053,7 +1141,7 @@ def run_feasibility(
 
     parsed, name_emb, prep_emb, dequant_emb, _ = load_or_build_recipe_artifacts(
         recipe_ingredients,
-        paths["amount"].parent / "recipe_cache",
+        recipe_cache_dir or paths["amount"].parent / "recipe_cache",
         force=force_all and not only_no_portion,
     )
 

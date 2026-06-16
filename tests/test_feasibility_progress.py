@@ -68,6 +68,20 @@ def test_progress_writer_judge_rows(tmp_path: Path) -> None:
     assert len(load_judge_checkpoint(tmp_path / "judge_matches_raw.parquet")) == 2
 
 
+def test_quiet_flush_writes_stats(tmp_path: Path) -> None:
+    writer = FeasibilityProgressWriter(
+        tmp_path, run_id="quiet", quiet=True, flush_every=2, parquet_compact_every=2
+    )
+    writer.set_phase("judging", total=4)
+    for i in range(4):
+        writer.record_judge_row(_row(1, i))
+    progress = json.loads((tmp_path / "progress.json").read_text())
+    assert progress["prompts"]["done"] == 4
+    assert "stats" in progress
+    assert progress["stats"]["judge_fdc_matched"] == 4
+    writer.finalize()
+
+
 def test_run_judging_with_progress_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ingredient_match_llm import assemble_rows, run_judging
 

@@ -188,6 +188,9 @@ def run_line_enrichment_sync(
         if needs_line_enrichment(line, fields, rules_plan):
             unique[key] = (line, rules_plan)
 
+    if progress_writer is not None and unique:
+        progress_writer.add_prompt_budget(len(unique))
+
     async def _run():
         client = get_async_openai_client()
         sem = asyncio.Semaphore(concurrency)
