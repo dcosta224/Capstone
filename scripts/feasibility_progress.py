@@ -25,6 +25,9 @@ JUDGE_STREAM_JSONL = "judge_stream.jsonl"
 PHASE_LOG_JSONL = "phase_log.jsonl"
 JUDGE_RAW_PARQUET = "judge_matches_raw.parquet"
 
+# Phases that get exactly one tqdm bar for the full LLM pass (0 → total, then close).
+_LLM_BAR_PHASES = frozenset({"amount_classify", "judging", "portion_llm"})
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -71,6 +74,8 @@ class FeasibilityProgressWriter:
         self._judging_t0: float | None = None
         self._prompt_done = 0
         self._prompt_total: int | None = None
+        self._phase_bar_done = 0
+        self._phase_bar_total: int | None = None
         self._rows_since_compact = 0
         self._rows_since_s3 = 0
         self._t0 = time.perf_counter()
@@ -87,18 +92,12 @@ class FeasibilityProgressWriter:
         if self.quiet:
             warnings.filterwarnings("ignore")
             force_std_tqdm()
-            from tqdm import tqdm
-
-            self._pbar = tqdm(
-                total=0,
-                desc="feasibility",
-                unit="prompt",
-                file=sys.stderr,
-                dynamic_ncols=True,
-                mininterval=0.5,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
-            )
         self._write_progress()
+
+    @property
+    def show_secondary_progress(self) -> bool:
+        """False in Colab quiet mode — phase LLM bars are the only tqdm output."""
+        return not self.quiet
 
     @contextmanager
     def quiet_context(self) -> Iterator[None]:
@@ -114,22 +113,52 @@ class FeasibilityProgressWriter:
             sys.stdout.close()
             sys.stdout = saved
 
+    def _close_phase_bar(self) -> None:
+        if self._pbar is not None:
+            self._pbar.close()
+            self._pbar = None
+        self._phase_bar_done = 0
+        self._phase_bar_total = None
+
+    def _start_phase_bar(self, desc: str, total: int, *, unit: str = "line") -> None:
+        if not self.quiet or total <= 0:
+            return
+        self._close_phase_bar()
+        from tqdm import tqdm
+
+        self._phase_bar_total = total
+        self._pbar = tqdm(
+            total=total,
+            desc=desc,
+            unit=unit,
+            file=sys.stderr,
+            dynamic_ncols=True,
+            mininterval=0.5,
+            leave=True,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+        )
+
     def add_prompt_budget(self, n: int) -> None:
+        """Register LLM call count for progress.json and start the enrichment bar."""
         if n <= 0:
             return
         self._prompt_total = (self._prompt_total or 0) + n
-        if self._pbar is not None:
-            self._pbar.total = self._prompt_total
-            self._pbar.refresh()
+        if self._phase == "amount_classify" and self.quiet:
+            self._start_phase_bar("enrich", n, unit="line")
 
     def set_phase(self, name: str, *, total: int | None = None) -> None:
         now = _utc_now()
+        self._close_phase_bar()
         self._phase = name
         self._phase_started_at = now
         if name == "judging":
             self._judging_total = total
             self._judging_done = 0
             self._judging_t0 = time.perf_counter()
+            if total:
+                self._prompt_total = (self._prompt_total or 0) + total
+        elif name == "portion_llm" and total:
+            self._prompt_total = (self._prompt_total or 0) + total
         if not self.quiet:
             msg = f"=== phase: {name}"
             if total is not None:
@@ -137,6 +166,9 @@ class FeasibilityProgressWriter:
             msg += " ==="
             print(msg, flush=True)
         self._append_phase_log({"event": "phase_start", "phase": name, "total": total})
+        if self.quiet and name in _LLM_BAR_PHASES and total is not None and name != "amount_classify":
+            bar_desc = "judging" if name == "judging" else name
+            self._start_phase_bar(bar_desc, total, unit="line")
         self._write_progress()
         self._refresh_bar_postfix()
 
@@ -167,7 +199,6 @@ class FeasibilityProgressWriter:
 
     def record_portion_llm_pick(self) -> None:
         self._stats["portion_llm_picks"] += 1
-        self.add_prompt_budget(1)
         self._tick_prompt("portion")
 
     def record_judge_row(self, exp: dict[str, Any]) -> int:
@@ -198,6 +229,7 @@ class FeasibilityProgressWriter:
 
     def _tick_prompt(self, phase: str, *, last_row: dict[str, Any] | None = None) -> None:
         self._prompt_done += 1
+        self._phase_bar_done += 1
         self._stats["prompts_done"] = self._prompt_done
         if self._pbar is not None:
             self._pbar.update(1)
@@ -213,9 +245,15 @@ class FeasibilityProgressWriter:
         if self._pbar is None:
             return
         phase_label = phase or self._phase
-        err = self._stats["judge_errors"]
-        matched = self._stats["judge_fdc_matched"]
-        self._pbar.set_postfix_str(f"{phase_label} err={err} fdc={matched}", refresh=False)
+        if phase_label in ("enrich", "amount_classify"):
+            err = self._stats["enrichment_errors"]
+            self._pbar.set_postfix_str(f"err={err}", refresh=False)
+        elif phase_label in ("judge", "judging"):
+            err = self._stats["judge_errors"]
+            matched = self._stats["judge_fdc_matched"]
+            self._pbar.set_postfix_str(f"err={err} fdc={matched}", refresh=False)
+        elif phase_label == "portion":
+            self._pbar.set_postfix_str(f"picks={self._stats['portion_llm_picks']}", refresh=False)
 
     def compact_parquet(self) -> int:
         if not self._jsonl_path.is_file():
@@ -231,8 +269,7 @@ class FeasibilityProgressWriter:
         self._append_phase_log({"event": "finalize", "phase": self._phase})
         self._write_progress()
         self.maybe_sync_s3(force=True)
-        if self._pbar is not None:
-            self._pbar.close()
+        self._close_phase_bar()
 
     def maybe_sync_s3(self, *, force: bool) -> None:
         raw_prefix = os.environ.get("COLAB_PROGRESS_S3_PREFIX", "").strip()

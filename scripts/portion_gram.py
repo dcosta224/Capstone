@@ -16,6 +16,7 @@ from amount_kind import (
     classify_amount_kind,
     classify_from_parsed_row,
     infer_count_query,
+    missing_quantity,
     normalize_count_unit,
     _normalize_parsed_unit,
 )
@@ -23,13 +24,15 @@ from db import connect
 from recipe_parse_rules import normalize_unit, rule_parse_fields
 from unit_convert import (
     UnitConversionError,
+    VOLUME_TO_ML,
+    canonical_volume_token,
     convert_mass,
     convert_volume,
     normalize_mass_unit,
     normalize_volume_unit,
     unit_kind,
 )
-from usda_volume_units import MASS_PATTERN, VOLUME_PATTERN, text_has_volume
+from usda_volume_units import MASS_PATTERN, VOLUME_PATTERN, text_has_fluid_ounce, text_has_volume
 
 # measure_unit.id → canonical volume unit (USDA reference table)
 STRUCTURED_VOLUME_MEASURE_UNIT_IDS: dict[int, str] = {
@@ -61,6 +64,11 @@ MEASURE_UNIT_NAME_TO_CANONICAL: dict[str, str] = {
     "pints": "pint",
     "quart": "quart",
     "quarts": "quart",
+    "fl oz": "fluid_ounce",
+    "fluid ounce": "fluid_ounce",
+    "fluid ounces": "fluid_ounce",
+    "gallon": "gallon",
+    "gallons": "gallon",
 }
 
 NON_INFORMATIVE_MEASURE_UNITS = frozenset(
@@ -92,6 +100,9 @@ VOLUME_TOKEN_TO_CANONICAL: dict[str, str] = {
     "tsp": "teaspoon",
     "teaspoon": "teaspoon",
     "teaspoons": "teaspoon",
+    "fl oz": "fluid_ounce",
+    "fluid ounce": "fluid_ounce",
+    "fluid ounces": "fluid_ounce",
     "liter": "liter",
     "litre": "liter",
     "liters": "liter",
@@ -103,19 +114,17 @@ VOLUME_TOKEN_TO_CANONICAL: dict[str, str] = {
     "pints": "pint",
     "quart": "quart",
     "quarts": "quart",
+    "gallon": "gallon",
+    "gallons": "gallon",
+    "cc": "milliliter",
+    "cubic centimeter": "milliliter",
+    "cubic centimeters": "milliliter",
+    "cubic cm": "milliliter",
+    "cubic inch": "cubic_inch",
+    "cubic inches": "cubic_inch",
 }
 
-SUPPORTED_VOLUME_UNITS = frozenset(
-    {
-        "teaspoon",
-        "tablespoon",
-        "cup",
-        "pint",
-        "quart",
-        "milliliter",
-        "liter",
-    }
-)
+SUPPORTED_VOLUME_UNITS = frozenset(VOLUME_TO_ML.keys())
 
 LEADING_AMOUNT_RE = re.compile(
     r"^\s*([\d]+(?:\.\d+)?(?:\s+\d+/\d+)?)\s+",
@@ -264,7 +273,11 @@ def _parse_data_points(raw: object) -> int:
 
 def _canonical_from_volume_token(token: str) -> str | None:
     key = token.lower().replace(".", "").strip()
-    return VOLUME_TOKEN_TO_CANONICAL.get(key)
+    key = re.sub(r"\s+", " ", key)
+    mapped = VOLUME_TOKEN_TO_CANONICAL.get(key)
+    if mapped:
+        return mapped
+    return canonical_volume_token(token)
 
 
 def _extract_volume_unit_from_text(*parts: str) -> str | None:
@@ -303,6 +316,8 @@ def _portion_fields_to_search(row: dict[str, Any]) -> list[str]:
 
 def _field_has_mass(text: str) -> bool:
     if not text:
+        return False
+    if text_has_fluid_ounce(text):
         return False
     return bool(MASS_TOKEN_RE.search(text) or MASS_PATTERN.search(text))
 
@@ -779,6 +794,36 @@ def load_portion_rows_cache(conn, fdc_ids: set[int] | list[int]) -> dict[int, li
     return cache
 
 
+def _grams_from_volume_candidate(
+    q: float,
+    unit_str: str,
+    portion: PortionCandidate,
+    *,
+    via_judge: bool = False,
+) -> PortionGramResult | None:
+    try:
+        recipe_ml = convert_volume(q, unit_str, "milliliter")
+        ref_ml = convert_volume(portion.ref_amount, portion.ref_unit, "milliliter")
+    except UnitConversionError:
+        return None
+    if ref_ml <= 0:
+        return None
+    grams = round((recipe_ml / ref_ml) * portion.gram_weight, 4)
+    via = "judge " if via_judge else ""
+    return PortionGramResult(
+        grams=grams,
+        status="ok_volume_portion",
+        unit_kind="volume",
+        portion_id=portion.portion_id,
+        portion_ref_amount=portion.ref_amount,
+        portion_ref_unit=portion.ref_unit,
+        method=(
+            f"volume:{q} {unit_str} via {via}portion#{portion.portion_id} "
+            f"({portion.ref_amount} {portion.ref_unit}={portion.gram_weight}g)"
+        ),
+    )
+
+
 def resolve_grams(
     fdc_id: int | None,
     quantity: Real | None,
@@ -790,6 +835,7 @@ def resolve_grams(
     portion_index: dict[int, list[PortionCandidate]] | None = None,
     count_portion_index: dict[int, list[CountPortionCandidate]] | None = None,
     conn=None,
+    matched_portion_id: int | None = None,
 ) -> PortionGramResult:
     """
     Resolve grams for a matched food and parsed amount.
@@ -866,6 +912,23 @@ def resolve_grams(
         else:
             raise PortionGramError("resolve_grams count path needs count_portion_index or conn")
 
+        if matched_portion_id is not None:
+            chosen = next(
+                (c for c in count_candidates if c.portion_id == matched_portion_id),
+                None,
+            )
+            if chosen is not None:
+                grams = (q / chosen.ref_amount) * chosen.gram_weight
+                return PortionGramResult(
+                    grams=round(grams, 4),
+                    status="ok_count_portion",
+                    unit_kind="count",
+                    portion_id=chosen.portion_id,
+                    portion_ref_amount=chosen.ref_amount,
+                    portion_ref_unit=chosen.count_label,
+                    method=f"count via judge portion_id={chosen.portion_id}",
+                )
+
         count_portion = pick_best_count_portion(count_candidates, query_tokens)
         if count_portion is None:
             return PortionGramResult(
@@ -913,6 +976,13 @@ def resolve_grams(
             if (c := normalize_portion_row(row)) is not None
         ]
 
+    if matched_portion_id is not None:
+        chosen = next((c for c in candidates if c.portion_id == matched_portion_id), None)
+        if chosen is not None:
+            result = _grams_from_volume_candidate(q, unit_str, chosen, via_judge=True)
+            if result is not None:
+                return result
+
     portion = pick_best_portion(candidates, unit_str)
     if portion is None:
         return PortionGramResult(
@@ -922,9 +992,8 @@ def resolve_grams(
             method=f"no volume portion for fdc_id={fdc_int}",
         )
 
-    recipe_ml = convert_volume(q, unit_str, "milliliter")
-    ref_ml = convert_volume(portion.ref_amount, portion.ref_unit, "milliliter")
-    if ref_ml <= 0:
+    result = _grams_from_volume_candidate(q, unit_str, portion, via_judge=False)
+    if result is None:
         return PortionGramResult(
             grams=None,
             status="no_portion",
@@ -932,20 +1001,7 @@ def resolve_grams(
             portion_id=portion.portion_id,
             method="invalid portion reference volume",
         )
-
-    grams = (recipe_ml / ref_ml) * portion.gram_weight
-    return PortionGramResult(
-        grams=round(grams, 4),
-        status="ok_volume_portion",
-        unit_kind="volume",
-        portion_id=portion.portion_id,
-        portion_ref_amount=portion.ref_amount,
-        portion_ref_unit=portion.ref_unit,
-        method=(
-            f"volume:{q} {unit_str} via portion#{portion.portion_id} "
-            f"({portion.ref_amount} {portion.ref_unit}={portion.gram_weight}g)"
-        ),
-    )
+    return result
 
 
 def load_portion_index_from_db() -> dict[int, list[PortionCandidate]]:
@@ -1083,6 +1139,7 @@ def resolve_grams_from_plan(
                     portion_index=portion_index,
                     count_portion_index=count_portion_index,
                     conn=conn,
+                    matched_portion_id=matched_portion_id,
                 )
 
         if path == "count_portion":
@@ -1175,6 +1232,14 @@ def resolve_grams_from_plan(
             status="ambiguous_accepted",
             unit_kind=plan.primary_amount_kind,
             method="ambiguous quantity; accepted non-resolution",
+        )
+
+    if "no_quantity_specified" in plan.flags and missing_quantity(plan.quantity):
+        return PortionGramResult(
+            grams=None,
+            status="no_quantity",
+            unit_kind="unmeasurable",
+            method="no quantity specified; grams not required",
         )
 
     if "vague_amount" in plan.flags and plan.quantity is None:

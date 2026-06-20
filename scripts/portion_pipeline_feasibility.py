@@ -17,12 +17,20 @@ Usage:
   uv run python scripts/portion_pipeline_feasibility.py --finalize-only  # report from cache
   uv run python scripts/portion_pipeline_feasibility.py --force-judging    # redo LLM match
   uv run python scripts/portion_pipeline_feasibility.py --only-no-portion --force-payloads  # retry failures
+  uv run python scripts/portion_pipeline_feasibility.py --only-unresolved --force-payloads  # retry missing fdc/grams
 
 Targeted no_portion re-run (after v4; writes to separate dir, baseline unchanged):
   cd Capstone && uv run python scripts/portion_pipeline_feasibility.py \\
     --n-recipes 1000 --seed 42 --only-no-portion --force-payloads \\
     --baseline-dir scratch/EDA/portion_feasibility_1000 \\
     2>&1 | tee -a scratch/EDA/portion_feasibility_1000_v4_no_portion/run.log
+
+Targeted unresolved re-run (v4 baseline; missing llm_fdc_id and/or grams):
+  cd Capstone && uv run python scripts/portion_pipeline_feasibility.py \\
+    --n-recipes 1000 --seed 42 --only-unresolved --force-payloads --force-judging \\
+    --baseline-dir scratch/EDA/portion_feasibility_1000_v4_no_portion \\
+    --out-dir scratch/EDA/portion_feasibility_1000_v5_unresolved \\
+    2>&1 | tee scratch/EDA/portion_feasibility_1000_v5_unresolved/run.log
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from amount_kind import missing_quantity
 from line_enrichment_llm import apply_enrichment_to_plan, run_line_enrichment_sync
 from resolution_plan import build_resolution_plan, needs_line_enrichment
 from db import connect, load_dotenv
@@ -84,6 +93,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / "scratch" / "EDA" / "portion_feasibility_1000"
 DEFAULT_BASELINE = DEFAULT_OUT
 DEFAULT_V4_OUT = ROOT / "scratch" / "EDA" / "portion_feasibility_1000_v4_no_portion"
+DEFAULT_V5_OUT = ROOT / "scratch" / "EDA" / "portion_feasibility_1000_v5_unresolved"
+PartialRetryMode = str  # "no_portion" | "unresolved"
 DEFAULT_FOOD_CACHE = ROOT / "scratch" / "recipe_matching_llm_100_portion"
 MANIFEST_VERSION = 3
 
@@ -152,20 +163,34 @@ def write_manifest(out_dir: Path, manifest: dict[str, Any]) -> None:
     (out_dir / MANIFEST_PATH).write_text(json.dumps(manifest, indent=2) + "\n")
 
 
+def partial_retry_mode(
+    *,
+    only_no_portion: bool = False,
+    only_unresolved: bool = False,
+) -> PartialRetryMode | None:
+    if only_no_portion and only_unresolved:
+        raise ValueError("Use only one of --only-no-portion or --only-unresolved")
+    if only_unresolved:
+        return "unresolved"
+    if only_no_portion:
+        return "no_portion"
+    return None
+
+
 def resolve_run_dirs(
     *,
     out_dir: Path,
     baseline_dir: Path | None,
-    only_no_portion: bool,
+    retry_mode: PartialRetryMode | None,
 ) -> tuple[Path, Path]:
-    """Return (baseline_dir, write_dir). For --only-no-portion, never write into baseline."""
-    if not only_no_portion:
+    """Return (baseline_dir, write_dir). Partial retries never write into baseline."""
+    if retry_mode is None:
         return out_dir, out_dir
 
     baseline = (baseline_dir or out_dir).resolve()
     write = out_dir.resolve()
     if write == baseline:
-        write = DEFAULT_V4_OUT
+        write = DEFAULT_V5_OUT if retry_mode == "unresolved" else DEFAULT_V4_OUT
     return baseline, write
 
 
@@ -203,6 +228,7 @@ def classify_ingredient_lines(
     model: str,
     progress_writer: Any = None,
     enrichment_concurrency: int = 8,
+    only_enrich_keys: set[tuple[int, int]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Rules parse + resolution plan; selective LLM line enrichment."""
     rows: list[dict[str, Any]] = []
@@ -210,6 +236,7 @@ def classify_ingredient_lines(
 
     for row in recipe_ingredients.itertuples(index=False):
         ingredient = str(row.ingredient)
+        key = _ingredient_key(int(row.recipe_id), int(row.ingredient_idx))
         rules = resolve_quantity_fields(ingredient, method="rules")
         parse_fields = {
             "quantity": rules.get("quantity"),
@@ -221,7 +248,8 @@ def classify_ingredient_lines(
         }
         rules_plan = build_resolution_plan(parse_fields, ingredient_raw=ingredient)
         if needs_line_enrichment(ingredient, parse_fields, rules_plan):
-            enrich_items.append((ingredient, parse_fields))
+            if only_enrich_keys is None or key in only_enrich_keys:
+                enrich_items.append((ingredient, parse_fields))
         rows.append({
             "recipe_id": int(row.recipe_id),
             "ingredient_idx": int(row.ingredient_idx),
@@ -293,7 +321,9 @@ def load_or_classify_amounts(
     paths: dict[str, Path],
     manifest: dict[str, Any],
     force: bool,
-    only_no_portion: bool = False,
+    retry_mode: PartialRetryMode | None = None,
+    baseline_paths: dict[str, Path] | None = None,
+    retry_limit: int | None = None,
     progress_writer: Any = None,
     enrichment_concurrency: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
@@ -301,7 +331,7 @@ def load_or_classify_amounts(
     if (
         not force
         and paths["amount"].is_file()
-        and (only_no_portion or manifest_matches(saved, manifest))
+        and (retry_mode is not None or manifest_matches(saved, manifest))
     ):
         amount_df = pd.read_parquet(paths["amount"])
         amount_llm_df = (
@@ -321,11 +351,23 @@ def load_or_classify_amounts(
         print(f"Loaded cached amount classification ({len(amount_df)} lines)", flush=True)
         return amount_df, amount_llm_df, summary
 
+    only_enrich_keys: set[tuple[int, int]] | None = None
+    if retry_mode is not None and baseline_paths is not None:
+        only_enrich_keys = _partial_retry_keys(
+            baseline_paths, retry_mode=retry_mode, retry_limit=retry_limit
+        )
+        if only_enrich_keys:
+            print(
+                f"Line enrichment LLM scoped to {len(only_enrich_keys)} partial-retry line(s)",
+                flush=True,
+            )
+
     amount_df, amount_llm_df, summary = classify_ingredient_lines(
         recipe_ingredients,
         model=model,
         progress_writer=progress_writer,
         enrichment_concurrency=enrichment_concurrency,
+        only_enrich_keys=only_enrich_keys,
     )
     amount_df.to_parquet(paths["amount"], index=False)
     if not amount_llm_df.empty:
@@ -333,6 +375,21 @@ def load_or_classify_amounts(
     write_manifest(paths["amount"].parent, manifest)
     print(f"Amount classification: {summary}", flush=True)
     return amount_df, amount_llm_df, summary
+
+
+def _ingredient_key(recipe_id: int, ingredient_idx: int) -> tuple[int, int]:
+    return (int(recipe_id), int(ingredient_idx))
+
+
+def _row_in_retry_keys(
+    row: Any,
+    only_keys: set[tuple[int, int]] | None,
+) -> bool:
+    if only_keys is None:
+        return True
+    rid = int(row.recipe_id if hasattr(row, "recipe_id") else row["recipe_id"])
+    iidx = int(row.ingredient_idx if hasattr(row, "ingredient_idx") else row["ingredient_idx"])
+    return _ingredient_key(rid, iidx) in only_keys
 
 
 def _fdc_has_classifiable_portion(
@@ -350,6 +407,45 @@ def _fdc_has_classifiable_portion(
     return False
 
 
+def _portion_llm_row_eligible(row) -> bool:
+    """Rescue only when rules still have no_portion after judge portion + heuristics."""
+    if bool(row.get("llm_negligible_calories")):
+        return False
+    if not bool(row.get("needs_portion")):
+        return False
+    if pd.isna(row.get("llm_fdc_id")) or pd.isna(row.get("quantity")):
+        return False
+    if pd.notna(row.get("grams")):
+        return False
+    if row.get("rules_grams_status") != "no_portion":
+        return False
+    amount_kind = str(row.get("amount_kind_final") or row.get("amount_kind"))
+    return amount_kind in ("volume", "count")
+
+
+def _count_portion_llm_calls(
+    matches_df: pd.DataFrame,
+    *,
+    conn,
+    portion_rows_cache: dict[int, list[dict[str, Any]]] | None,
+    only_keys: set[tuple[int, int]] | None = None,
+) -> int:
+    n = 0
+    for _, row in matches_df.iterrows():
+        if not _row_in_retry_keys(row, only_keys):
+            continue
+        if not _portion_llm_row_eligible(row):
+            continue
+        fdc_id = int(row["llm_fdc_id"])
+        if portion_rows_cache is not None:
+            raw_rows = portion_rows_cache.get(fdc_id, [])
+        else:
+            raw_rows = _load_portion_rows_for_fdc(conn, fdc_id)
+        if raw_rows:
+            n += 1
+    return n
+
+
 def apply_portion_llm_pass(
     matches_df: pd.DataFrame,
     parsed_lookup: dict[tuple[int, int], dict[str, Any]],
@@ -358,28 +454,33 @@ def apply_portion_llm_pass(
     model: str,
     portion_rows_cache: dict[int, list[dict[str, Any]]] | None = None,
     progress_writer: Any = None,
+    only_keys: set[tuple[int, int]] | None = None,
 ) -> pd.DataFrame:
-    """LLM portion pick where rules returned no_portion."""
+    """LLM portion pick when judge omitted matched_portion_id or rules conversion failed."""
     from datetime import datetime, timezone
 
     out = matches_df.copy()
     n_picks = 0
     n_rescued = 0
     if progress_writer is not None:
-        progress_writer.set_phase("portion_llm")
+        n_portion_llm = _count_portion_llm_calls(
+            matches_df,
+            conn=conn,
+            portion_rows_cache=portion_rows_cache,
+            only_keys=only_keys,
+        )
+        progress_writer.set_phase("portion_llm", total=n_portion_llm)
+
+    if only_keys is not None:
+        print(
+            f"Portion LLM pass: scoped to {len(only_keys)} partial-retry line(s)",
+            flush=True,
+        )
 
     for i, row in out.iterrows():
-        if not bool(row.get("needs_portion")):
+        if not _row_in_retry_keys(row, only_keys):
             continue
-        if pd.isna(row.get("llm_fdc_id")) or pd.isna(row.get("quantity")):
-            continue
-        if pd.notna(row.get("grams")):
-            continue
-        if row.get("rules_grams_status") != "no_portion":
-            continue
-
-        amount_kind = str(row.get("amount_kind_final") or row.get("amount_kind"))
-        if amount_kind not in ("volume", "count"):
+        if not _portion_llm_row_eligible(row):
             continue
 
         fdc_id = int(row["llm_fdc_id"])
@@ -390,6 +491,7 @@ def apply_portion_llm_pass(
         if not raw_rows:
             continue
 
+        amount_kind = str(row.get("amount_kind_final") or row.get("amount_kind"))
         parsed = parsed_lookup.get((int(row["recipe_id"]), int(row["ingredient_idx"])), {})
         llm_meta = pick_portion_sync(
             model,
@@ -447,6 +549,8 @@ def enrich_matches_with_rules_grams(
     volume_index: dict,
     count_index: dict,
     portion_rows_cache: dict[int, list[dict[str, Any]]] | None = None,
+    progress_writer: FeasibilityProgressWriter | None = None,
+    only_keys: set[tuple[int, int]] | None = None,
 ) -> pd.DataFrame:
     out = matches_df.copy()
     rules_grams: list[float | None] = []
@@ -460,9 +564,29 @@ def enrich_matches_with_rules_grams(
     volume_fdc_ids = set(volume_index.keys())
     count_fdc_ids = set(count_index.keys())
     n = len(out)
-    print(f"Rules gram enrichment: {n} rows", flush=True)
+    if only_keys is not None:
+        print(
+            f"Rules gram enrichment: {len(only_keys)} partial-retry line(s) "
+            f"(preserving baseline for {n - len(only_keys)} others)",
+            flush=True,
+        )
+    else:
+        print(f"Rules gram enrichment: {n} rows", flush=True)
 
-    for row in iter_progress(out.itertuples(index=False), total=n, desc="Rules grams", enabled=True):
+    show_progress = progress_writer is None or progress_writer.show_secondary_progress
+    for row in iter_progress(
+        out.itertuples(index=False), total=n, desc="Rules grams", enabled=show_progress
+    ):
+        if not _row_in_retry_keys(row, only_keys):
+            rules_grams.append(getattr(row, "rules_grams", None))
+            rules_status.append(getattr(row, "rules_grams_status", None))
+            rules_method.append(getattr(row, "rules_grams_method", None))
+            usda_avail.append(bool(getattr(row, "usda_portion_available", False)))
+            portion_llm_cert.append(getattr(row, "portion_llm_certainty", None))
+            portion_llm_rat.append(getattr(row, "portion_llm_rationale", None))
+            portion_resolved_by_llm.append(bool(getattr(row, "portion_resolved_by_llm", False)))
+            continue
+
         parsed = parsed_lookup.get((int(row.recipe_id), int(row.ingredient_idx)), {})
         amount_kind = str(
             getattr(row, "amount_kind_final", None)
@@ -474,6 +598,7 @@ def enrich_matches_with_rules_grams(
         matched_pid = getattr(row, "matched_portion_id", None)
         if pd.isna(matched_pid):
             matched_pid = None
+        neglig = bool(getattr(row, "llm_negligible_calories", False))
         rules_result = resolve_grams_from_parsed_row(
             parsed_for_resolve,
             int(row.llm_fdc_id) if pd.notna(row.llm_fdc_id) else None,
@@ -481,6 +606,7 @@ def enrich_matches_with_rules_grams(
             count_portion_index=count_index,
             matched_portion_id=int(matched_pid) if matched_pid is not None else None,
             portion_rows_cache=portion_rows_cache,
+            llm_negligible_calories=neglig,
         )
         rules_grams.append(rules_result.grams)
         rules_status.append(rules_result.status)
@@ -549,6 +675,7 @@ def build_feasibility_report(
     has_fdc = merged["llm_fdc_id"].notna()
     has_grams = merged["grams"].notna()
     both = has_fdc & has_grams
+    has_qty = ~merged["quantity"].map(missing_quantity) if "quantity" in merged.columns else pd.Series(True, index=merged.index)
 
     needs = merged[merged["needs_portion"].fillna(False)]
     needs_fdc = needs["llm_fdc_id"].notna()
@@ -566,6 +693,12 @@ def build_feasibility_report(
         "fdc_match_rate_all": _rate(has_fdc, len(merged)),
         "gram_resolve_rate_all": _rate(has_grams, len(merged)),
         "fdc_and_gram_rate_all": _rate(both, len(merged)),
+        "n_no_quantity_lines": int((~has_qty).sum()),
+        "gram_resolve_rate_measurable": _rate(merged.loc[has_qty, "grams"].notna(), int(has_qty.sum())),
+        "fdc_and_gram_rate_measurable": _rate(
+            merged.loc[has_qty, "llm_fdc_id"].notna() & merged.loc[has_qty, "grams"].notna(),
+            int(has_qty.sum()),
+        ),
         "n_needs_portion_lines": int(needs.shape[0]),
         "fdc_match_rate_needs_portion": _rate(needs_fdc, len(needs)),
         "gram_resolve_rate_needs_portion": _rate(needs_grams, len(needs)),
@@ -723,45 +856,59 @@ def _subset_parsed_and_embeddings(
     )
 
 
-def _print_no_portion_subset_preview(
+def _print_partial_retry_subset_preview(
     parsed: pd.DataFrame,
     *,
     retry_keys: set[tuple[int, int]],
     total_lines: int,
+    retry_mode: PartialRetryMode,
 ) -> None:
+    label = "unresolved (missing fdc and/or grams)" if retry_mode == "unresolved" else "no_portion"
     print(
-        f"only-no-portion retrieval subset: {len(parsed)} / {total_lines} lines "
-        f"({len(retry_keys)} no_portion keys from baseline)",
+        f"partial retry ({label}): {len(parsed)} / {total_lines} lines "
+        f"({len(retry_keys)} keys from baseline)",
         flush=True,
     )
     for i, ing in enumerate(parsed["ingredient"].head(8), start=1):
         print(f"  [{i}] {str(ing)[:120]}", flush=True)
 
 
-def _no_portion_keys(paths: dict[str, Path]) -> set[tuple[int, int]]:
-    """Keys with grams_status=no_portion from prior pipeline or judge artifacts."""
-    if paths["matches"].is_file():
-        df = pd.read_parquet(paths["matches"])
-        if "grams_status" in df.columns:
-            sub = df[df["grams_status"] == "no_portion"]
-            return {
-                (int(r.recipe_id), int(r.ingredient_idx))
-                for r in sub.itertuples(index=False)
-            }
-    for cache in (paths["judge_raw"], paths["matches"]):
+def _load_baseline_matches_df(paths: dict[str, Path]) -> pd.DataFrame:
+    for cache in (paths["matches"], paths["judge_raw"]):
         if cache.is_file():
-            df = pd.read_parquet(cache)
-            if "grams_status" in df.columns:
-                sub = df[df["grams_status"] == "no_portion"]
-                if len(sub):
-                    return {
-                        (int(r.recipe_id), int(r.ingredient_idx))
-                        for r in sub.itertuples(index=False)
-                    }
+            return pd.read_parquet(cache)
     raise FileNotFoundError(
-        " --only-no-portion requires pipeline_matches.parquet or judge_matches_raw.parquet "
-        "with grams_status from a prior run"
+        "Partial retry requires pipeline_matches.parquet or judge_matches_raw.parquet "
+        "from a prior run"
     )
+
+
+def _partial_retry_keys(
+    paths: dict[str, Path],
+    *,
+    retry_mode: PartialRetryMode,
+    retry_limit: int | None = None,
+) -> set[tuple[int, int]]:
+    df = _load_baseline_matches_df(paths)
+    if retry_mode == "no_portion":
+        if "grams_status" not in df.columns:
+            raise ValueError("--only-no-portion requires grams_status on baseline artifacts")
+        sub = df[df["grams_status"] == "no_portion"]
+    else:
+        has_fdc = df["llm_fdc_id"].notna() if "llm_fdc_id" in df.columns else pd.Series(False, index=df.index)
+        has_grams = df["grams"].notna() if "grams" in df.columns else pd.Series(False, index=df.index)
+        sub = df[~has_fdc | ~has_grams]
+    keys = {
+        (int(r.recipe_id), int(r.ingredient_idx))
+        for r in sub.itertuples(index=False)
+    }
+    if retry_limit is not None and retry_limit >= 0:
+        keys = set(sorted(keys)[:retry_limit])
+    return keys
+
+
+def _no_portion_keys(paths: dict[str, Path]) -> set[tuple[int, int]]:
+    return _partial_retry_keys(paths, retry_mode="no_portion")
 
 
 def _filter_payloads(
@@ -796,8 +943,9 @@ def run_judging_cached(
     paths: dict[str, Path],
     manifest: dict[str, Any],
     force: bool,
-    only_no_portion: bool = False,
+    retry_mode: PartialRetryMode | None = None,
     baseline_paths: dict[str, Path] | None = None,
+    retry_limit: int | None = None,
     total_dataset_lines: int | None = None,
     disk_flush_every: int = 100,
     judge_log_every: int = 25,
@@ -811,15 +959,15 @@ def run_judging_cached(
     retry_keys: set[tuple[int, int]] | None = None
     base_df = load_judge_checkpoint(cache_path)
 
-    if only_no_portion:
-        retry_keys = _no_portion_keys(baseline_paths)
+    if retry_mode is not None:
+        retry_keys = _partial_retry_keys(
+            baseline_paths, retry_mode=retry_mode, retry_limit=retry_limit
+        )
         payloads = _filter_payloads(payloads, keys=retry_keys)
-        # Resume skips v4 rows already in the *write* checkpoint.
         write_ckpt = load_judge_checkpoint(cache_path)
         if not force and not write_ckpt.empty:
             skip = _v4_completed_keys(write_ckpt) & retry_keys
             payloads = _filter_payloads(payloads, skip_keys=skip)
-        # Baseline rows (resolved + not-yet-retried) always come from baseline dir.
         base_df = _load_baseline_judge_df(baseline_paths)
         if not base_df.empty and retry_keys:
             base_df = base_df[
@@ -829,13 +977,13 @@ def run_judging_cached(
                 )
             ]
         print(
-            f"only-no-portion: {len(retry_keys)} failure keys, {len(payloads)} to judge "
+            f"partial retry ({retry_mode}): {len(retry_keys)} failure keys, {len(payloads)} to judge "
             f"(baseline preserved: {len(base_df)} rows)",
             flush=True,
         )
     elif not force and not cache_path.is_file() and paths["matches"].is_file() and manifest_matches(saved, manifest):
         cache_path = paths["matches"]
-    elif not force and cache_path.is_file() and manifest_matches(saved, manifest) and not only_no_portion:
+    elif not force and cache_path.is_file() and manifest_matches(saved, manifest) and retry_mode is None:
         df = pd.read_parquet(cache_path)
         if cache_path == paths["matches"] and not paths["judge_raw"].is_file():
             judge_cols = [c for c in df.columns if c not in (
@@ -858,8 +1006,6 @@ def run_judging_cached(
     run_name = manifest.get("run_name", "feasibility")
     pricing = MODEL_PRICING.get(model, MODEL_PRICING[DEFAULT_MODEL])
     quiet = bool(progress_writer is not None and getattr(progress_writer, "quiet", False))
-    if progress_writer is not None:
-        progress_writer.add_prompt_budget(len(payloads))
 
     all_exp, _, _ = asyncio.run(
         run_judging(
@@ -886,7 +1032,7 @@ def run_judging_cached(
 
     if progress_writer is not None:
         new_df = pd.DataFrame(all_exp)
-        if only_no_portion and not base_df.empty:
+        if retry_mode is not None and not base_df.empty:
             df = pd.concat([base_df, new_df], ignore_index=True)
         elif new_df.empty:
             df = load_judge_checkpoint(cache_path)
@@ -895,12 +1041,15 @@ def run_judging_cached(
         df.to_parquet(cache_path, index=False)
     else:
         new_df = pd.DataFrame(all_exp)
-        if only_no_portion and not base_df.empty:
+        if retry_mode is not None and not base_df.empty:
             df = pd.concat([base_df, new_df], ignore_index=True)
         else:
             df = new_df
         df.to_parquet(cache_path, index=False)
-    manifest["only_no_portion"] = only_no_portion
+    if retry_mode is not None:
+        manifest["partial_retry_mode"] = retry_mode
+        manifest["only_no_portion"] = retry_mode == "no_portion"
+        manifest["only_unresolved"] = retry_mode == "unresolved"
     write_manifest(paths["judge_raw"].parent, manifest)
     n_ok = df["llm_fdc_id"].notna().sum()
     print(f"Saved judge results ({len(df)} rows, {n_ok} fdc matches)", flush=True)
@@ -932,6 +1081,8 @@ def run_feasibility(
     force_all: bool,
     finalize_only: bool,
     only_no_portion: bool = False,
+    only_unresolved: bool = False,
+    retry_limit: int | None = None,
     use_mlflow: bool = True,
     mlflow_experiment: str = DEFAULT_EXPERIMENT,
     progress_mode: str = "default",
@@ -944,10 +1095,14 @@ def run_feasibility(
     recipe_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     load_dotenv()
+    retry_mode = partial_retry_mode(
+        only_no_portion=only_no_portion,
+        only_unresolved=only_unresolved,
+    )
     baseline_dir_resolved, write_dir = resolve_run_dirs(
         out_dir=out_dir,
         baseline_dir=baseline_dir,
-        only_no_portion=only_no_portion,
+        retry_mode=retry_mode,
     )
     write_dir.mkdir(parents=True, exist_ok=True)
     paths = _paths(write_dir)
@@ -970,10 +1125,10 @@ def run_feasibility(
     else:
         heartbeat_sec = 15.0
 
-    if only_no_portion:
+    if retry_mode is not None:
         if progress_writer is None or not progress_writer.quiet:
             print(
-                f"only-no-portion: baseline (read-only) {baseline_dir_resolved}\n"
+                f"partial retry ({retry_mode}): baseline (read-only) {baseline_dir_resolved}\n"
                 f"              writes -> {write_dir}",
                 flush=True,
             )
@@ -982,7 +1137,7 @@ def run_feasibility(
     if force_all:
         force_amount = force_judging = force_payloads = True
 
-    if force_all and not finalize_only and not only_no_portion:
+    if force_all and not finalize_only and retry_mode is None:
         _clear_phase_caches(paths)
 
     quiet_ctx = (
@@ -1004,7 +1159,8 @@ def run_feasibility(
             force_payloads=force_payloads,
             force_all=force_all,
             finalize_only=finalize_only,
-            only_no_portion=only_no_portion,
+            retry_mode=retry_mode,
+            retry_limit=retry_limit,
             use_mlflow=use_mlflow,
             mlflow_experiment=mlflow_experiment,
             enrichment_concurrency=enrichment_concurrency,
@@ -1037,7 +1193,8 @@ def _run_feasibility_pipeline(
     force_payloads: bool,
     force_all: bool,
     finalize_only: bool,
-    only_no_portion: bool,
+    retry_mode: PartialRetryMode | None,
+    retry_limit: int | None,
     use_mlflow: bool,
     mlflow_experiment: str,
     enrichment_concurrency: int,
@@ -1074,9 +1231,13 @@ def _run_feasibility_pipeline(
         n_lines=len(recipe_ingredients),
     )
     manifest["run_name"] = f"feasibility_{n_recipes}_seed{seed}"
-    if only_no_portion:
-        manifest["only_no_portion"] = True
+    if retry_mode is not None:
+        manifest["partial_retry_mode"] = retry_mode
+        manifest["only_no_portion"] = retry_mode == "no_portion"
+        manifest["only_unresolved"] = retry_mode == "unresolved"
         manifest["baseline_dir"] = str(baseline_dir_resolved)
+    if retry_limit is not None:
+        manifest["retry_limit"] = retry_limit
 
     feasibility_version: int | None = None
     if use_mlflow:
@@ -1127,7 +1288,9 @@ def _run_feasibility_pipeline(
         paths=paths,
         manifest=manifest,
         force=force_amount,
-        only_no_portion=only_no_portion,
+        retry_mode=retry_mode,
+        baseline_paths=baseline_paths if retry_mode is not None else None,
+        retry_limit=retry_limit,
         progress_writer=progress_writer,
         enrichment_concurrency=enrichment_concurrency,
     )
@@ -1139,10 +1302,12 @@ def _run_feasibility_pipeline(
         for r in recipes.itertuples(index=False)
     }
 
+    show_progress = progress_writer is None or progress_writer.show_secondary_progress
     parsed, name_emb, prep_emb, dequant_emb, _ = load_or_build_recipe_artifacts(
         recipe_ingredients,
         recipe_cache_dir or paths["amount"].parent / "recipe_cache",
-        force=force_all and not only_no_portion,
+        force=force_all and retry_mode is None,
+        show_progress=show_progress,
     )
 
     kind_lookup = amount_df.set_index(["recipe_id", "ingredient_idx"])
@@ -1168,7 +1333,9 @@ def _run_feasibility_pipeline(
 
     match_config = StagedMatchConfig()
     retr_config = LLMRetrievalConfig()
-    food_index = build_food_index(food_cache_dir, match_config, force=force_all)
+    food_index = build_food_index(
+        food_cache_dir, match_config, force=force_all, show_progress=show_progress
+    )
 
     with connect() as conn:
         capabilities = build_portion_capability_sets(conn)
@@ -1181,8 +1348,10 @@ def _run_feasibility_pipeline(
         retry_keys_for_retrieval: set[tuple[int, int]] | None = None
         parsed_for_payloads = parsed
         name_emb_p, prep_emb_p, dequant_emb_p = name_emb, prep_emb, dequant_emb
-        if only_no_portion:
-            retry_keys_for_retrieval = _no_portion_keys(baseline_paths)
+        if retry_mode is not None:
+            retry_keys_for_retrieval = _partial_retry_keys(
+                baseline_paths, retry_mode=retry_mode, retry_limit=retry_limit
+            )
             parsed_for_payloads, name_emb_p, prep_emb_p, dequant_emb_p = (
                 _subset_parsed_and_embeddings(
                     parsed,
@@ -1192,19 +1361,20 @@ def _run_feasibility_pipeline(
                     retry_keys_for_retrieval,
                 )
             )
-            _print_no_portion_subset_preview(
+            _print_partial_retry_subset_preview(
                 parsed_for_payloads,
                 retry_keys=retry_keys_for_retrieval,
                 total_lines=len(recipe_ingredients),
+                retry_mode=retry_mode,
             )
-            manifest["n_no_portion_retry"] = len(retry_keys_for_retrieval)
+            manifest[f"n_{retry_mode}_retry"] = len(retry_keys_for_retrieval)
 
         payloads = _load_payloads(paths, manifest, force_payloads)
-        if payloads is not None and only_no_portion and retry_keys_for_retrieval:
+        if payloads is not None and retry_mode is not None and retry_keys_for_retrieval:
             before = len(payloads)
             payloads = _filter_payloads(payloads, keys=retry_keys_for_retrieval)
             print(
-                f"Filtered cached payloads: {before} -> {len(payloads)} no_portion rows",
+                f"Filtered cached payloads: {before} -> {len(payloads)} {retry_mode} rows",
                 flush=True,
             )
         if payloads is None:
@@ -1240,8 +1410,9 @@ def _run_feasibility_pipeline(
             paths=paths,
             manifest=manifest,
             force=force_judging,
-            only_no_portion=only_no_portion,
-            baseline_paths=baseline_paths if only_no_portion else None,
+            retry_mode=retry_mode,
+            baseline_paths=baseline_paths if retry_mode is not None else None,
+            retry_limit=retry_limit,
             total_dataset_lines=len(recipe_ingredients),
             disk_flush_every=disk_flush_every,
             judge_log_every=judge_log_every,
@@ -1251,14 +1422,26 @@ def _run_feasibility_pipeline(
         matches_df = attach_amount_fields(matches_df, amount_df)
 
         portion_rows_cache: dict[int, list[dict[str, Any]]] | None = None
+        llm_scope_keys = retry_keys_for_retrieval if retry_mode is not None else None
         needs_enrich = "rules_grams" not in matches_df.columns
         if needs_enrich or force_judging or force_amount or force_all:
             if progress_writer is not None:
                 progress_writer.set_phase("rules_grams")
-            matched_fdc_ids = {
-                int(x)
-                for x in matches_df["llm_fdc_id"].dropna().unique()
-            }
+            if llm_scope_keys is not None:
+                scoped = matches_df[
+                    matches_df.apply(
+                        lambda r: _ingredient_key(int(r["recipe_id"]), int(r["ingredient_idx"]))
+                        in llm_scope_keys,
+                        axis=1,
+                    )
+                ]
+                matched_fdc_ids = {
+                    int(x) for x in scoped["llm_fdc_id"].dropna().unique()
+                }
+            else:
+                matched_fdc_ids = {
+                    int(x) for x in matches_df["llm_fdc_id"].dropna().unique()
+                }
             print(
                 f"Batch-loading portion rows for {len(matched_fdc_ids):,} matched fdc_ids…",
                 flush=True,
@@ -1271,17 +1454,39 @@ def _run_feasibility_pipeline(
                 volume_index=volume_index,
                 count_index=count_index,
                 portion_rows_cache=portion_rows_cache,
+                progress_writer=progress_writer,
+                only_keys=llm_scope_keys,
             )
-            matches_df["grams"] = matches_df["rules_grams"]
-            matches_df["grams_status"] = matches_df["rules_grams_status"]
-            matches_df["grams_method"] = matches_df["rules_grams_method"]
+            if llm_scope_keys is not None:
+                retry_mask = matches_df.apply(
+                    lambda r: _ingredient_key(int(r["recipe_id"]), int(r["ingredient_idx"]))
+                    in llm_scope_keys,
+                    axis=1,
+                )
+                matches_df.loc[retry_mask, "grams"] = matches_df.loc[retry_mask, "rules_grams"]
+                matches_df.loc[retry_mask, "grams_status"] = matches_df.loc[
+                    retry_mask, "rules_grams_status"
+                ]
+                matches_df.loc[retry_mask, "grams_method"] = matches_df.loc[
+                    retry_mask, "rules_grams_method"
+                ]
+            else:
+                matches_df["grams"] = matches_df["rules_grams"]
+                matches_df["grams_status"] = matches_df["rules_grams_status"]
+                matches_df["grams_method"] = matches_df["rules_grams_method"]
 
         if not skip_portion_llm:
             already_done = (
                 "portion_resolved_by_llm" in matches_df.columns
                 and matches_df["portion_resolved_by_llm"].fillna(False).any()
             )
-            if force_judging or force_all or not already_done:
+            should_run_portion_llm = (
+                retry_mode is not None
+                or force_judging
+                or force_all
+                or not already_done
+            )
+            if should_run_portion_llm:
                 matches_df = apply_portion_llm_pass(
                     matches_df,
                     parsed_lookup,
@@ -1289,6 +1494,7 @@ def _run_feasibility_pipeline(
                     model=model,
                     portion_rows_cache=portion_rows_cache,
                     progress_writer=progress_writer,
+                    only_keys=llm_scope_keys,
                 )
 
     if progress_writer is not None:
@@ -1327,6 +1533,15 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--food-cache-dir", type=Path, default=DEFAULT_FOOD_CACHE)
     parser.add_argument("--limit", type=int, default=None, help="Limit ingredient lines for dry run")
+    parser.add_argument(
+        "--retry-limit",
+        type=int,
+        default=None,
+        help=(
+            "With --only-unresolved/--only-no-portion: max failure lines to re-process; "
+            "all LLM calls (judge, portion pick, line enrichment) are limited to those keys"
+        ),
+    )
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--skip-portion-llm", action="store_true")
     parser.add_argument("--finalize-only", action="store_true", help="Rebuild report from cached parquets")
@@ -1344,10 +1559,15 @@ def main() -> None:
         help="Re-judge no_portion rows; read --baseline-dir, write separate v4 output dir",
     )
     parser.add_argument(
+        "--only-unresolved",
+        action="store_true",
+        help="Re-judge rows missing llm_fdc_id and/or grams; merge with baseline resolved rows",
+    )
+    parser.add_argument(
         "--baseline-dir",
         type=Path,
         default=None,
-        help="Prior run artifacts to read (default: portion_feasibility_1000). Never modified.",
+        help="Prior run artifacts to read (default depends on retry mode). Never modified.",
     )
     parser.add_argument("--no-mlflow", action="store_true", help="Skip MLflow logging")
     parser.add_argument(
@@ -1364,6 +1584,8 @@ def main() -> None:
     baseline = args.baseline_dir
     if args.only_no_portion and baseline is None:
         baseline = DEFAULT_BASELINE
+    if args.only_unresolved and baseline is None:
+        baseline = DEFAULT_V4_OUT
 
     run_feasibility(
         n_recipes=args.n_recipes,
@@ -1381,6 +1603,8 @@ def main() -> None:
         force_all=args.force_all,
         finalize_only=args.finalize_only,
         only_no_portion=args.only_no_portion,
+        only_unresolved=args.only_unresolved,
+        retry_limit=args.retry_limit,
         use_mlflow=not args.no_mlflow,
         mlflow_experiment=args.mlflow_experiment,
     )

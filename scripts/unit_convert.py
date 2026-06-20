@@ -1,8 +1,9 @@
 """Convert recipe portion quantities between volume and mass units.
 
-Uses US customary definitions for kitchen units (cup, tbsp, tsp, pint, quart)
-and SI for metric (mL, L, g, kg). Mass ounces are avoirdupois (weight oz),
-not fluid ounces.
+Uses US customary definitions for kitchen units (cup, tbsp, tsp, pint, quart,
+fluid ounce, gallon) and SI for metric (mL, L, g, kg). Mass ounces are
+avoirdupois (weight oz), not fluid ounces — use ``fl oz`` / ``fluid ounce``
+for volume.
 
 Primary entry points:
   convert_volume(quantity, from_unit, to_unit)
@@ -17,8 +18,12 @@ Example:
 
 from __future__ import annotations
 
+import re
 from numbers import Real
 from typing import Literal
+
+# Match before bare mass ``oz`` in combined strings like ``fl oz``.
+FLUID_OUNCE_TEXT_RE = re.compile(r"\bfl\.?\s*oz\b|\bfluid\s+ounces?\b", re.IGNORECASE)
 
 UnitKind = Literal["volume", "mass"]
 
@@ -26,11 +31,14 @@ UnitKind = Literal["volume", "mass"]
 VOLUME_TO_ML: dict[str, float] = {
     "teaspoon": 4.92892159375,
     "tablespoon": 14.7867647813,
+    "fluid_ounce": 29.5735295625,
     "cup": 236.5882365,
     "pint": 473.176473,
     "quart": 946.352946,
+    "gallon": 3785.411784,
     "milliliter": 1.0,
     "liter": 1000.0,
+    "cubic_inch": 16.387064,
 }
 
 MASS_TO_GRAM: dict[str, float] = {
@@ -67,6 +75,19 @@ VOLUME_ALIASES: dict[str, str] = {
     "liters": "liter",
     "litre": "liter",
     "litres": "liter",
+    "fl oz": "fluid_ounce",
+    "floz": "fluid_ounce",
+    "fluid ounce": "fluid_ounce",
+    "fluid ounces": "fluid_ounce",
+    "gal": "gallon",
+    "gallon": "gallon",
+    "gallons": "gallon",
+    "cc": "milliliter",
+    "cubic centimeter": "milliliter",
+    "cubic centimeters": "milliliter",
+    "cubic cm": "milliliter",
+    "cubic inch": "cubic_inch",
+    "cubic inches": "cubic_inch",
 }
 
 MASS_ALIASES: dict[str, str] = {
@@ -98,7 +119,21 @@ def _clean_unit_token(unit: str) -> str:
         raise UnitConversionError("Unit string is empty")
     if text == "T":
         return "T"
-    return text.lower().replace(".", "")
+    lowered = text.lower()
+    if FLUID_OUNCE_TEXT_RE.search(lowered):
+        return "fluid ounce"
+    normalized = lowered.replace(".", "")
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def canonical_volume_token(raw: str) -> str | None:
+    """Map a volume token (from regex or USDA text) to a canonical unit, or None."""
+    if not raw or not str(raw).strip():
+        return None
+    try:
+        return normalize_volume_unit(str(raw))
+    except UnitConversionError:
+        return None
 
 
 def normalize_volume_unit(unit: str) -> str:
@@ -121,6 +156,8 @@ def normalize_mass_unit(unit: str) -> str:
 
 def unit_kind(unit: str) -> UnitKind:
     """Return ``volume`` or ``mass`` for a unit string."""
+    if FLUID_OUNCE_TEXT_RE.search(str(unit)):
+        return "volume"
     token = _clean_unit_token(unit)
     if token in VOLUME_ALIASES or token in VOLUME_TO_ML:
         return "volume"

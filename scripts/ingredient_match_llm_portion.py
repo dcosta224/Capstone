@@ -72,35 +72,23 @@ from sample_recipes import load_sampled_recipes
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LLM_WORK_DIR = ROOT / "scratch" / "recipe_matching_llm_100_portion"
 MLFLOW_EXPERIMENT = "ingredient_match_llm_portion"
-PROMPT_VERSION = "v4_portion_good_enough"
+PROMPT_VERSION = "v6_micro_volume_semantic_fallback"
 
 SYSTEM_PROMPT = (
-    "You match one recipe ingredient to the best USDA FoodData Central entry (fdc_id) "
-    "for nutrition lookup.\n"
-    "Each candidate line is formatted `fdc_id | description | L | S | P | portions | fit`:\n"
-    "  L = lexical score; S = semantic score (0-1, higher = closer).\n"
-    "  P = V volume, C count, Cm container-mass (can/jar in modifier), VC both, -=none.\n"
-    "  portions = top USDA portion lines; fit = portion label match 0-1.\n"
-    "Selection rules:\n"
-    "- When mass is explicit in the recipe line, pick best food identity; portions are informational.\n"
-    "- For volume/count amounts, prefer candidates with P!=- and fit>0 over slightly better "
-    "lexical matches without usable portions, when they are the same base food.\n"
-    "- Prep (minced/chopped/diced/sliced) does NOT change count-based amounts. Prefer raw/generic "
-    "fdc with count portions over processed 'MINCED X' entries with P=-.\n"
-    "- Chopping affects volume, not count: '1 c. chopped onion' is volume; '1 onion, chopped' is count.\n"
-    "- Return matched_portion_id when a portion line is a good-enough match (exact unit/size, "
-    "container modifier, or acceptable size fallback).\n"
-    "- Size fallback when recipe has generic count (e.g. '3 eggs'): prefer medium, then large, "
-    "then small portion modifiers on the chosen fdc.\n"
-    "- Container units (can/jar/box): pick modifier containing that unit even if rules_class=mass.\n"
-    "- Only pick P=- when no top-10 candidate has a plausible portion AND portion-bearing options "
-    "are a fundamentally different food.\n"
-    "- Set negligible_calories=true when the ingredient is nutritionally insignificant in context "
-    "(baking powder, leavening, spices in small amounts) even if grams cannot be resolved. "
-    "Do NOT mark flour, sugar, butter, or oil as negligible.\n"
-    f"- Water/ice/plain salt/garnish with no match: pick fdc_id {SENTINEL_FDC_ID}.\n"
-    f"- Set fdc_id to null only when no candidate fits AND the ingredient has meaningful calories.\n"
-    "Use recipe steps as context. Output JSON only."
+    "Match recipe ingredient → USDA fdc_id.\n"
+    "Candidates: fdc_id | description | L | S | P | portions | fit "
+    "(P=V/C/Cm/VC/-; fit=unit match 0-1).\n"
+    "Best identity first; else closest same-type substitute with usable portions "
+    "(e.g. white wine vinegar→distilled vinegar). Never substitute different forms "
+    "(e.g. garlic powder→garlic raw, dried→fresh). Abstain only if ≥20 kcal expected "
+    "and no substitute.\n"
+    "Volume/count: prefer P!=- and fit>0; set matched_portion_id when fit>0.\n"
+    "When SEMANTIC_FALLBACK is present and all primary candidates have fit=0, pick "
+    "best identity from SEMANTIC_FALLBACK; set negligible_calories=true if this qty "
+    "likely <20 kcal and matched_portion_id=null.\n"
+    "certainty 0-1 = joint confidence in fdc identity/substitute AND portion-unit fit (lower if either weak).\n"
+    "negligible_calories=true only if THIS qty likely <20 kcal. Never flour, sugar, butter, oil.\n"
+    f"Water/ice/plain salt/garnish: {SENTINEL_FDC_ID}. JSON only."
 )
 
 
@@ -143,7 +131,8 @@ def precompute_payloads_portion(
                 flush=True,
             )
 
-    progress = iter_progress(range(n), total=n, desc="Retrieval + prompts", enabled=True)
+    show_progress = progress_writer is None or progress_writer.show_secondary_progress
+    progress = iter_progress(range(n), total=n, desc="Retrieval + prompts", enabled=show_progress)
     progress_iter = iter(progress)
 
     for chunk_idx, start in enumerate(range(0, n, chunk_size), start=1):
@@ -220,19 +209,30 @@ def precompute_payloads_portion(
             n_semantic_pool = int(cand_df.attrs.get("n_semantic_pool", 0)) if not cand_df.empty else 0
 
             prompt_candidates = cand_df[cand_df["in_llm_prompt"]] if not cand_df.empty else cand_df
-            n_retrieved_candidates = int(len(prompt_candidates))
-            prompt_candidates = _append_sentinel_candidate(prompt_candidates)
+            semantic_fb = retr.semantic_fallback
+            if semantic_fb is not None and not semantic_fb.empty:
+                prompt_for_judge = pd.concat(
+                    [prompt_candidates, semantic_fb], ignore_index=True
+                ).drop_duplicates(subset=["fdc_id"], keep="first")
+            else:
+                prompt_for_judge = prompt_candidates
+            n_retrieved_candidates = int(len(prompt_for_judge))
+            skip_sentinel = (
+                retr.portion_filter_kind in ("volume", "count") and not retr.mass_in_text
+            )
+            if not skip_sentinel:
+                prompt_for_judge = _append_sentinel_candidate(prompt_for_judge)
             valid_fdc_ids = (
-                set(int(x) for x in prompt_candidates["fdc_id"])
-                if not prompt_candidates.empty
+                set(int(x) for x in prompt_for_judge["fdc_id"])
+                if not prompt_for_judge.empty
                 else set()
             )
             prompt_desc = (
                 {
                     int(r.fdc_id): str(r.description)
-                    for r in prompt_candidates.itertuples(index=False)
+                    for r in prompt_for_judge.itertuples(index=False)
                 }
-                if not prompt_candidates.empty
+                if not prompt_for_judge.empty
                 else {}
             )
 
@@ -248,6 +248,8 @@ def precompute_payloads_portion(
                 retr_config.description_max_chars,
                 mass_in_text=retr.mass_in_text,
                 query_tokens=list(retr.query_tokens),
+                quantity=row.get("quantity"),
+                semantic_fallback=semantic_fb,
             )
 
             top10 = cand_df.head(retr_config.top10_size) if not cand_df.empty else cand_df
@@ -302,6 +304,7 @@ def precompute_payloads_portion(
                     "mass_in_text": retr.mass_in_text,
                     "portion_query_tokens": list(retr.query_tokens),
                     "portion_filter_kind": retr.portion_filter_kind,
+                    "has_semantic_fallback": semantic_fb is not None and not semantic_fb.empty,
                     "n_tier1_union": retr.n_tier1_union,
                     "tier1_max_score": retr.tier1_max_score,
                     "staged_fdc_id": staged_top1,

@@ -59,8 +59,10 @@ def probe_memory() -> dict[str, Any]:
         "backend": "transformers",
         "judge_concurrency": 2,
         "vllm_max_num_seqs": 0,
-        "max_new_tokens_judge": 512,
-        "max_new_tokens_short": 256,
+        "max_new_tokens_judge": 1024,
+        "max_new_tokens_enrichment": 1024,
+        "max_new_tokens_portion": 512,
+        "max_new_tokens_cap": 2048,
         "embed_batch": 0,
     }
 
@@ -107,7 +109,14 @@ PROBE = probe_memory()
 print(json.dumps(PROBE, indent=2))
 
 
-def extract_json(text: str) -> dict[str, Any]:
+def openai_schema_inner(response_schema: dict[str, Any]) -> dict[str, Any]:
+    """Inner JSON Schema from OpenAI response_format wrapper."""
+    if "schema" in response_schema:
+        return response_schema["schema"]
+    return response_schema
+
+
+def parse_json_output(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if not text:
         raise ValueError("empty model output")
@@ -213,6 +222,53 @@ class OssJsonLlm:
         tok = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
         return len(tok.encode(text))
 
+    def _generate_raw(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        inner_schema: dict[str, Any] | None,
+    ) -> tuple[str, str | None]:
+        """Single generation; vLLM uses StructuredOutputsParams(json=...) when schema set."""
+        if self.backend == "vllm":
+            sp_kw: dict[str, Any] = {"temperature": 0.0, "max_tokens": max_new_tokens}
+            if inner_schema is not None:
+                from vllm.sampling_params import StructuredOutputsParams
+
+                sp_kw["structured_outputs"] = StructuredOutputsParams(json=inner_schema)
+            params = self._SamplingParams(**sp_kw)
+            with self._lock:
+                outs = self._llm.generate([prompt], params, use_tqdm=False)
+            out = outs[0].outputs[0]
+            finish_reason = getattr(out, "finish_reason", None)
+            return out.text.strip(), finish_reason
+
+        def _gen_transformers() -> tuple[str, str | None]:
+            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+            gen_kw: dict[str, Any] = {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,
+                "pad_token_id": self._tokenizer.eos_token_id,
+            }
+            if inner_schema is not None:
+                from lmformatenforcer import JsonSchemaParser
+                from lmformatenforcer.integrations.transformers import (
+                    build_transformers_prefix_allowed_tokens_fn,
+                )
+
+                parser = JsonSchemaParser(inner_schema)
+                gen_kw["prefix_allowed_tokens_fn"] = build_transformers_prefix_allowed_tokens_fn(
+                    parser, self._tokenizer
+                )
+            with torch.inference_mode():
+                out = self._model.generate(**inputs, **gen_kw)
+            new_tokens = out[0, inputs["input_ids"].shape[1] :]
+            raw = self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            finish_reason = "length" if int(new_tokens.shape[-1]) >= max_new_tokens else "stop"
+            return raw, finish_reason
+
+        with self._lock:
+            return _gen_transformers()
+
     def generate_json(
         self,
         system: str,
@@ -220,35 +276,42 @@ class OssJsonLlm:
         *,
         max_new_tokens: int = 512,
         extra_user: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> GenResult:
-        full_user = user + (f"\n\n{extra_user}" if extra_user else "")
-        full_user += "\n\nRespond with a single JSON object only. No markdown fences."
-        prompt = self._chat_prompt(system, full_user)
-        prompt_tokens = self._count_tokens(prompt)
+        inner_schema = openai_schema_inner(json_schema) if json_schema else None
+        token_cap = int(self.probe.get("max_new_tokens_cap", 2048))
+        tokens = max_new_tokens
+        last_exc: Exception | None = None
 
-        if self.backend == "vllm":
-            params = self._SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
-            outs = self._llm.generate([prompt], params)
-            raw = outs[0].outputs[0].text.strip()
-            completion_tokens = self._count_tokens(raw)
-            return GenResult(extract_json(raw), raw, prompt_tokens, completion_tokens)
+        for attempt in range(3):
+            full_user = user + (f"\n\n{extra_user}" if extra_user else "")
+            if inner_schema is None:
+                full_user += "\n\nRespond with a single JSON object only. No markdown fences."
+            prompt = self._chat_prompt(system, full_user)
+            prompt_tokens = self._count_tokens(prompt)
 
-        def _gen() -> str:
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
-            with torch.inference_mode():
-                out = self._model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=self._tokenizer.eos_token_id,
-                )
-            new_tokens = out[0, inputs["input_ids"].shape[1] :]
-            return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            try:
+                raw, finish_reason = self._generate_raw(prompt, tokens, inner_schema)
+                completion_tokens = self._count_tokens(raw)
+                parsed = parse_json_output(raw)
+                truncated = finish_reason == "length" or completion_tokens >= tokens - 1
+                if truncated and tokens < token_cap and attempt < 2:
+                    tokens = min(tokens * 2, token_cap)
+                    continue
+                if truncated:
+                    raise ValueError(
+                        f"model output truncated at max_tokens={tokens} "
+                        f"(finish_reason={finish_reason!r})"
+                    )
+                return GenResult(parsed, raw, prompt_tokens, completion_tokens)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2 and tokens < token_cap:
+                    tokens = min(tokens * 2, token_cap)
+                    continue
+                raise
 
-        with self._lock:
-            raw = _gen()
-        completion_tokens = self._count_tokens(raw)
-        return GenResult(extract_json(raw), raw, prompt_tokens, completion_tokens)
+        raise last_exc or RuntimeError("generate_json failed")
 
     async def generate_json_async(self, *args, **kwargs) -> GenResult:
         return await asyncio.to_thread(self.generate_json, *args, **kwargs)
@@ -284,13 +347,20 @@ except Exception as exc:
         )
     OSS_LLM = OssJsonLlm(FALLBACK_MODEL, PROBE)
 
-# Warmup: one short JSON call (validates backend without noisy multi-call output)
+# Warmup: structured JSON call (validates vLLM StructuredOutputsParams / lm-format-enforcer)
+_warmup_schema = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
 _r = OSS_LLM.generate_json(
     "You output JSON only.",
-    'Return {"ok": true}',
+    "Return ok=true.",
     max_new_tokens=64,
+    json_schema=_warmup_schema,
 )
-print("OSS backend ready:", OSS_LLM.backend, OSS_LLM.model_id)
+print("OSS backend ready:", OSS_LLM.backend, OSS_LLM.model_id, "warmup=", _r.parsed)
 '''.strip() + "\n"
 
 
@@ -303,6 +373,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ingredient_match_llm as iml
+import ingredient_match_llm_portion as iml_portion
 import line_enrichment_llm as lel
 import portion_resolve_llm as prl
 import openai_fallback
@@ -337,7 +408,7 @@ async def oss_judge_async(
     *,
     system_prompt: str | None = None,
 ):
-    sys_prompt = system_prompt or iml.SYSTEM_PROMPT
+    sys_prompt = system_prompt or iml_portion.SYSTEM_PROMPT
     prompt_tokens = completion_tokens = 0
     error = None
     parsed: dict = {}
@@ -347,7 +418,8 @@ async def oss_judge_async(
         r = await OSS_LLM.generate_json_async(
             sys_prompt,
             user_prompt,
-            max_new_tokens=PROBE.get("max_new_tokens_judge", 512),
+            max_new_tokens=PROBE.get("max_new_tokens_judge", 1024),
+            json_schema=iml.RESPONSE_SCHEMA,
         )
         parsed, raw_response = r.parsed, r.raw
         prompt_tokens += r.prompt_tokens
@@ -361,7 +433,8 @@ async def oss_judge_async(
             r2 = await OSS_LLM.generate_json_async(
                 sys_prompt,
                 user_prompt,
-                max_new_tokens=PROBE.get("max_new_tokens_judge", 512),
+                max_new_tokens=PROBE.get("max_new_tokens_judge", 1024),
+                json_schema=iml.RESPONSE_SCHEMA,
                 extra_user=hint,
             )
             parsed, raw_response = r2.parsed, r2.raw
@@ -407,7 +480,8 @@ async def oss_enrich_one_async(client, model: str, ingredient: str, rules_plan):
         r = await OSS_LLM.generate_json_async(
             lel.SYSTEM_PROMPT,
             user,
-            max_new_tokens=PROBE.get("max_new_tokens_short", 256),
+            max_new_tokens=PROBE.get("max_new_tokens_enrichment", 1024),
+            json_schema=lel.RESPONSE_SCHEMA,
         )
         parsed, raw_response = r.parsed, r.raw
         prompt_tokens += r.prompt_tokens
@@ -417,7 +491,8 @@ async def oss_enrich_one_async(client, model: str, ingredient: str, rules_plan):
             r2 = await OSS_LLM.generate_json_async(
                 lel.SYSTEM_PROMPT,
                 user,
-                max_new_tokens=PROBE.get("max_new_tokens_short", 256),
+                max_new_tokens=PROBE.get("max_new_tokens_enrichment", 1024),
+                json_schema=lel.RESPONSE_SCHEMA,
                 extra_user=f"Validation failed ({validation_error}). Fix and resubmit.",
             )
             parsed, raw_response = r2.parsed, r2.raw
@@ -468,7 +543,8 @@ def oss_pick_portion_sync(
     r = OSS_LLM.generate_json(
         prl.SYSTEM_PROMPT,
         user,
-        max_new_tokens=PROBE.get("max_new_tokens_short", 256),
+        max_new_tokens=PROBE.get("max_new_tokens_portion", 512),
+        json_schema=prl.RESPONSE_SCHEMA,
     )
     parsed = r.parsed
     return {
@@ -549,7 +625,7 @@ cells = [
     ),
     md(
         "## Progress\n\n"
-        "The pipeline cell shows **one tqdm bar** for all LLM prompts. "
+        "The pipeline cell shows **one tqdm bar per LLM pass** (enrichment, judging, portion). "
         "`progress.json` under `OUT` updates every 10 prompts with live stats "
         "(and syncs to S3 when `COLAB_PROGRESS_S3_PREFIX` is set)."
     ),
@@ -564,7 +640,8 @@ cells = [
         "%%capture\n"
         "!pip install -q transformers accelerate bitsandbytes sentence-transformers \\\n"
         "  pandas pyarrow psycopg2-binary rapidfuzz ingredient-parser-nlp \\\n"
-        "  faiss-cpu scikit-learn tqdm psutil networkx python-dotenv boto3 nest_asyncio"
+        "  faiss-cpu scikit-learn tqdm psutil networkx python-dotenv boto3 nest_asyncio \\\n"
+        "  lm-format-enforcer"
     ),
     code(
         "%%capture\n"

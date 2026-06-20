@@ -86,7 +86,7 @@ The notebook:
 
 ## Monitoring progress during a run
 
-The pipeline cell shows **one tqdm bar** (stderr) for all LLM prompts. Stdout and warnings are suppressed during the run.
+The pipeline cell shows **one tqdm bar per LLM pass** (enrichment lines, judge calls, portion picks). Stdout and warnings are suppressed during the run.
 
 Artifacts under `/content/capstone_runs/<RUN_ID>/`:
 
@@ -137,6 +137,10 @@ Compare `feasibility_report.json` to `baseline_summary.json` from the input bund
 | **transformers + 4-bit** | vLLM install fails | **≥ 8** on 14GB+ VRAM; 2 on T4 |
 
 Default model: **Qwen/Qwen2.5-14B-Instruct** (NF4 4-bit). OOM → **Qwen/Qwen2.5-7B-Instruct**.
+
+All OSS LLM calls (enrichment, judge, portion pick) use **strict JSON schema** enforcement:
+vLLM `StructuredOutputsParams(json=...)` on A100; `lm-format-enforcer` on the transformers fallback.
+Token budgets: enrichment/judge 1024 (auto-doubles up to 2048 if truncated).
 
 ## Runtime expectations
 

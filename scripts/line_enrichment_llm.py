@@ -17,8 +17,9 @@ SYSTEM_PROMPT = (
     "- embedded_mass: parenthetical mass like (8 oz.)\n"
     "- explicit_mass, explicit_volume, count_portion\n"
     "- parenthetical_mass_override: parenthetical total weight overrides count\n"
-    "flags (non-exclusive): vague_amount, ambiguous_quantity_accepted, compound_ingredient, "
+    "flags (non-exclusive): vague_amount, micro_amount, ambiguous_quantity_accepted, compound_ingredient, "
     "negligible_calorie_compound\n"
+    "For dash/pinch units use explicit_volume (not count_portion).\n"
     "Set authoritative_mass_is_total=true when parenthetical mass is total weight, not per-piece.\n"
     "For compounds (parsley and chives), set is_compound=true and list components.\n"
     "certainty 0.0-1.0; rationale one short sentence."
@@ -49,6 +50,7 @@ RESPONSE_SCHEMA = {
                     "type": "string",
                     "enum": [
                         "vague_amount",
+                        "micro_amount",
                         "ambiguous_quantity_accepted",
                         "compound_ingredient",
                         "negligible_calorie_compound",

@@ -82,6 +82,25 @@ def test_quiet_flush_writes_stats(tmp_path: Path) -> None:
     writer.finalize()
 
 
+def test_per_phase_bars_enrich_then_judge(tmp_path: Path) -> None:
+    writer = FeasibilityProgressWriter(tmp_path, quiet=True, flush_every=1, parquet_compact_every=10)
+    writer.set_phase("amount_classify", total=1000)
+    writer.add_prompt_budget(3)
+    for i in range(3):
+        writer.record_enrichment_row(
+            done=i + 1, total=3, ingredient_norm=f"ing{i}", error=None if i else "bad"
+        )
+    writer.set_phase("judging", total=2)
+    for i in range(2):
+        writer.record_judge_row(_row(2, i))
+    progress = json.loads((tmp_path / "progress.json").read_text())
+    assert progress["prompts"]["done"] == 5
+    assert progress["prompts"]["total"] == 5
+    assert progress["stats"]["enrichment_errors"] == 1
+    assert progress["judging"]["done"] == 2
+    writer.finalize()
+
+
 def test_run_judging_with_progress_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ingredient_match_llm import assemble_rows, run_judging
 

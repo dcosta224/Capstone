@@ -100,13 +100,10 @@ SYSTEM_PROMPT = (
     "Both range 0-1; higher means a closer match. Treat them as evidence, not absolute "
     "truth — read the descriptions yourself.\n"
     "Selection rules:\n"
-    "- Choose the candidate whose food identity best matches the ingredient. A candidate "
-    "with high L and high S whose description clearly names the same food is usually correct.\n"
-    "- 'Raw, generic, unbranded' is only a tie-breaker among candidates that refer to the "
-    "same food. Do NOT abstain or deflate certainty merely because a candidate is branded or "
-    "not raw/generic. If the ingredient names a specific processed/prepared product (e.g. "
-    "croutons, sauce, dressing, broth, cake mix) or the closest match is branded, pick it "
-    "confidently.\n"
+    "- Choose best identity; if none exact, closest same-type substitute (e.g. white wine vinegar→distilled vinegar).\n"
+    "- Abstain (fdc_id null) only when no plausible substitute AND expected contribution ≥20 kcal for this amount.\n"
+    "- negligible_calories: true only if this qty likely contributes <20 kcal. Never for flour, sugar, butter, oil.\n"
+    "- 'Raw, generic, unbranded' is only a tie-breaker among same-food candidates.\n"
     f"- If no candidate refers to the same food BUT the ingredient is essentially non-caloric "
     f"or nutritionally negligible (e.g. water, ice, plain salt, a garnish), pick fdc_id "
     f"{SENTINEL_FDC_ID} (the '{SENTINEL_DESCRIPTION}' entry) and set certainty to reflect how "
@@ -125,29 +122,23 @@ RESPONSE_SCHEMA = {
         "properties": {
             "fdc_id": {
                 "type": ["integer", "null"],
-                "description": "Chosen candidate fdc_id, or null if none fit.",
+                "description": "Best or closest-substitute fdc_id; null only if ≥20 kcal expected and no fit.",
             },
             "certainty": {
                 "type": "number",
-                "description": "Confidence in the choice, 0.0-1.0.",
+                "description": "0-1 joint confidence in fdc match/substitute and portion-unit fit.",
             },
             "rationale": {
                 "type": "string",
-                "description": "<= 20 words justifying the choice.",
+                "description": "<= 20 words.",
             },
             "matched_portion_id": {
                 "type": ["integer", "null"],
-                "description": (
-                    "Optional USDA food_portion id when a candidate portion line "
-                    "matches the recipe unit/count token."
-                ),
+                "description": "USDA food_portion.id when volume/count and fit>0; else null.",
             },
             "negligible_calories": {
                 "type": "boolean",
-                "description": (
-                    "True when the ingredient contributes negligible calories in this recipe "
-                    "context even if grams cannot be resolved (e.g. baking powder, spices)."
-                ),
+                "description": "True only if this ingredient amount likely contributes <20 kcal total.",
             },
         },
         "required": ["fdc_id", "certainty", "rationale", "matched_portion_id", "negligible_calories"],
@@ -166,12 +157,13 @@ def build_food_index(
     config: StagedMatchConfig,
     *,
     force: bool = False,
+    show_progress: bool = True,
 ) -> StagedFoodIndex:
     """Load cached food_4macro embeddings and assemble the staged index."""
     food_raw = load_food_4macro()
     print(f"food_4macro rows: {len(food_raw):,}", flush=True)
     food_name_emb, food_prep_emb, food_dequant_emb = load_or_build_food_artifacts(
-        food_raw, food_cache_dir, force=force
+        food_raw, food_cache_dir, force=force, show_progress=show_progress
     )[1:4]
     return StagedFoodIndex.from_catalog(
         food_raw,
@@ -179,6 +171,7 @@ def build_food_index(
         prep_embeddings=food_prep_emb,
         dequant_embeddings=food_dequant_emb,
         config=config,
+        show_progress=show_progress,
     )
 
 
@@ -262,6 +255,7 @@ def precompute_payloads(
     *,
     limit: int | None = None,
     chunk_size: int = 256,
+    progress_writer: Any = None,
 ) -> list[dict[str, Any]]:
     """All CPU work (retrieval + staged scoring + prompt assembly) per ingredient.
 
@@ -278,7 +272,8 @@ def precompute_payloads(
           f"(food matrix {food_index.dequant_matrix.shape if food_index.dequant_matrix is not None else 'none'})",
           flush=True)
 
-    progress = iter_progress(range(n), total=n, desc="Retrieval + prompts", enabled=True)
+    show_progress = progress_writer is None or progress_writer.show_secondary_progress
+    progress = iter_progress(range(n), total=n, desc="Retrieval + prompts", enabled=show_progress)
     progress_iter = iter(progress)
 
     for start in range(0, n, chunk_size):
