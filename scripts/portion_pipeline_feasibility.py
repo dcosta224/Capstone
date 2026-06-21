@@ -39,6 +39,7 @@ import argparse
 import asyncio
 import json
 import pickle
+import random
 import time
 import uuid
 from contextlib import nullcontext
@@ -70,7 +71,13 @@ from ingredient_match_llm_portion import (
     assemble_rows_portion,
     precompute_payloads_portion,
 )
-from judge_checkpoint import load_judge_checkpoint
+from judge_checkpoint import completed_keys, load_judge_checkpoint
+from build_dequant_norm_cache import (
+    apply_dequant_cache_to_payloads,
+    create_dequant_cache_runtime,
+    load_dequant_norm_cache,
+    resolve_dequant_cache_path,
+)
 from ingredient_match_staged import LLMRetrievalConfig, StagedMatchConfig
 from ingredient_query_cache import load_or_build_recipe_artifacts
 from portion_candidate_index import load_or_build_portion_summary_index
@@ -163,6 +170,69 @@ def write_manifest(out_dir: Path, manifest: dict[str, Any]) -> None:
     (out_dir / MANIFEST_PATH).write_text(json.dumps(manifest, indent=2) + "\n")
 
 
+def mark_openai_partial_manifest(
+    manifest: dict[str, Any],
+    *,
+    phase: str,
+    completed: int,
+    total: int,
+    key_status: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Annotate manifest so the same command can resume after key exhaustion."""
+    from openai_fallback import OPENAI_PARTIAL_STATUS
+
+    manifest["status"] = OPENAI_PARTIAL_STATUS
+    manifest["openai_key_status"] = key_status or {}
+    manifest["resume"] = {
+        "phase": phase,
+        "completed": completed,
+        "total": total,
+        "pending": max(total - completed, 0),
+        "artifact_files": [
+            AMOUNT_PATH,
+            AMOUNT_LLM_PATH,
+            JUDGE_RAW_PATH,
+            MATCHES_PATH,
+            PAYLOADS_PATH,
+        ],
+        "next_command_flags": _resume_flags_for_phase(phase),
+    }
+    if extra:
+        manifest["resume"].update(extra)
+    return manifest
+
+
+def _resume_flags_for_phase(phase: str) -> list[str]:
+    if phase == "judging":
+        return []
+    if phase == "amount_classify":
+        return ["--force-amount"]
+    if phase == "portion_llm":
+        return ["--force-judging"]
+    return []
+
+
+def print_openai_resume_hint(out_dir: Path, manifest: dict[str, Any]) -> None:
+    resume = manifest.get("resume") or {}
+    phase = resume.get("phase", "unknown")
+    completed = resume.get("completed", "?")
+    total = resume.get("total", "?")
+    flags = " ".join(resume.get("next_command_flags") or [])
+    print(
+        f"\nOpenAI API keys exhausted during {phase} ({completed}/{total} done). "
+        f"Partial artifacts saved under {out_dir}. "
+        f"Re-run the same command{' ' + flags if flags else ''} to resume.\n",
+        flush=True,
+    )
+
+
+def is_openai_partial_manifest(manifest: dict[str, Any] | None) -> bool:
+    from openai_fallback import OPENAI_PARTIAL_STATUS
+
+    return bool(manifest and manifest.get("status") == OPENAI_PARTIAL_STATUS)
+
+
 def partial_retry_mode(
     *,
     only_no_portion: bool = False,
@@ -215,8 +285,8 @@ def _seed_baseline_artifacts(
 
 
 def _load_baseline_judge_df(baseline_paths: dict[str, Path]) -> pd.DataFrame:
-    """Full prior judge/matches frame used to preserve non-retried rows."""
-    for cache in (baseline_paths["judge_raw"], baseline_paths["matches"]):
+    """Full prior run frame used to preserve non-retried rows (prefer final matches)."""
+    for cache in (baseline_paths["matches"], baseline_paths["judge_raw"]):
         if cache.is_file():
             return pd.read_parquet(cache)
     return pd.DataFrame()
@@ -747,6 +817,49 @@ def _enrich_report_with_judge_metrics(report: dict[str, Any], matches_df: pd.Dat
         report["no_portion_rate"] = _rate(no_portion, len(matches_df))
 
 
+def _finish_openai_partial_feasibility(
+    *,
+    amount_df: pd.DataFrame,
+    matches_df: pd.DataFrame,
+    amount_summary: dict[str, Any],
+    manifest: dict[str, Any],
+    paths: dict[str, Path],
+    write_dir: Path,
+    t0: float,
+    n_recipes: int,
+    seed: int,
+    model: str,
+    sampled_ids: list[int] | None,
+    skip_portion_llm: bool,
+    progress_writer: Any = None,
+) -> dict[str, Any]:
+    """Save partial pipeline artifacts and a feasibility report after key exhaustion."""
+    from openai_fallback import OPENAI_PARTIAL_STATUS
+
+    matches_df.to_parquet(paths["matches"], index=False)
+    write_manifest(write_dir, manifest)
+    report = build_feasibility_report(amount_df, matches_df, amount_summary=amount_summary)
+    report.update(
+        {
+            "status": OPENAI_PARTIAL_STATUS,
+            "elapsed_sec": round(time.perf_counter() - t0, 1),
+            "n_recipes": n_recipes,
+            "seed": seed,
+            "model": model,
+            "sampled_recipe_ids": sampled_ids,
+            "skip_portion_llm": skip_portion_llm,
+            "resume": manifest.get("resume"),
+        }
+    )
+    _enrich_report_with_judge_metrics(report, matches_df)
+    paths["report"].write_text(json.dumps(report, indent=2) + "\n")
+    if progress_writer is not None:
+        progress_writer.finalize()
+    print_openai_resume_hint(write_dir, manifest)
+    print(json.dumps(report, indent=2), flush=True)
+    return report
+
+
 def _finish_feasibility_run(
     *,
     report: dict[str, Any],
@@ -951,6 +1064,8 @@ def run_judging_cached(
     judge_log_every: int = 25,
     heartbeat_sec: float = 15.0,
     progress_writer: Any = None,
+    dequant_cache_path: Path | None = None,
+    no_dequant_cache: bool = False,
 ) -> pd.DataFrame:
     saved = load_manifest(paths["judge_raw"].parent)
     cache_path = paths["judge_raw"]
@@ -984,17 +1099,27 @@ def run_judging_cached(
     elif not force and not cache_path.is_file() and paths["matches"].is_file() and manifest_matches(saved, manifest):
         cache_path = paths["matches"]
     elif not force and cache_path.is_file() and manifest_matches(saved, manifest) and retry_mode is None:
-        df = pd.read_parquet(cache_path)
-        if cache_path == paths["matches"] and not paths["judge_raw"].is_file():
-            judge_cols = [c for c in df.columns if c not in (
-                "rules_grams", "rules_grams_status", "rules_grams_method",
-                "usda_portion_available", "portion_resolved_by_llm",
-            )]
-            df[judge_cols].to_parquet(paths["judge_raw"], index=False)
-            print("Migrated judge cache → judge_matches_raw.parquet", flush=True)
-        n_ok = df["llm_fdc_id"].notna().sum() if "llm_fdc_id" in df.columns else 0
-        print(f"Loaded cached judge results ({len(df)} rows, {n_ok} fdc matches)", flush=True)
-        return df
+        if not is_openai_partial_manifest(saved):
+            df = pd.read_parquet(cache_path)
+            if cache_path == paths["matches"] and not paths["judge_raw"].is_file():
+                judge_cols = [c for c in df.columns if c not in (
+                    "rules_grams", "rules_grams_status", "rules_grams_method",
+                    "usda_portion_available", "portion_resolved_by_llm",
+                )]
+                df[judge_cols].to_parquet(paths["judge_raw"], index=False)
+                print("Migrated judge cache → judge_matches_raw.parquet", flush=True)
+            n_ok = df["llm_fdc_id"].notna().sum() if "llm_fdc_id" in df.columns else 0
+            print(f"Loaded cached judge results ({len(df)} rows, {n_ok} fdc matches)", flush=True)
+            return df
+        pending = len(payloads)
+        if cache_path.is_file():
+            skip = completed_keys(load_judge_checkpoint(cache_path))
+            payloads = _filter_payloads(payloads, skip_keys=skip)
+            print(
+                f"Resuming judge after OpenAI key exhaustion: "
+                f"{len(skip)} done, {len(payloads)} pending (of {pending} total payloads)",
+                flush=True,
+            )
 
     if not payloads:
         if not base_df.empty:
@@ -1002,12 +1127,49 @@ def run_judging_cached(
             return base_df
         raise ValueError("No payloads to judge")
 
+    resolved_cache = resolve_dequant_cache_path(dequant_cache_path)
+    dequant_cache_runtime = None
+    if not no_dequant_cache:
+        cache_write_path = paths["judge_raw"].parent / "dequant_norm_llm_cache.json"
+        dequant_cache_runtime = create_dequant_cache_runtime(
+            load_path=resolved_cache,
+            write_path=cache_write_path,
+        )
+        n_cache_hits, payloads = apply_dequant_cache_to_payloads(
+            payloads,
+            dequant_cache_runtime.entries,
+            runtime=dequant_cache_runtime,
+        )
+        manifest["dequant_cache_path"] = str(resolved_cache or cache_write_path)
+        manifest["dequant_cache_write_path"] = str(cache_write_path)
+        manifest["dequant_cache_terms_initial"] = dequant_cache_runtime.stats["initial_terms"]
+        manifest["dequant_cache_hits_initial"] = n_cache_hits
+        print(
+            f"Dequant cache: {n_cache_hits:,}/{len(payloads):,} payloads hit "
+            f"({dequant_cache_runtime.stats['initial_terms']} initial terms from "
+            f"{resolved_cache.name if resolved_cache else 'empty'})",
+            flush=True,
+        )
+    elif dequant_cache_path is not None:
+        print(f"Warning: dequant cache disabled via --no-dequant-cache", flush=True)
+
+    if cache_path.is_file() and retry_mode is None and not force:
+        skip = completed_keys(load_judge_checkpoint(cache_path))
+        if skip:
+            before = len(payloads)
+            payloads = _filter_payloads(payloads, skip_keys=skip)
+            if before != len(payloads):
+                print(
+                    f"Skipping {len(skip)} already-judged lines ({len(payloads)} pending)",
+                    flush=True,
+                )
+
     run_id = uuid.uuid4().hex
     run_name = manifest.get("run_name", "feasibility")
     pricing = MODEL_PRICING.get(model, MODEL_PRICING[DEFAULT_MODEL])
     quiet = bool(progress_writer is not None and getattr(progress_writer, "quiet", False))
 
-    all_exp, _, _ = asyncio.run(
+    all_exp, _, breaker = asyncio.run(
         run_judging(
             payloads,
             run_id=run_id,
@@ -1027,8 +1189,25 @@ def run_judging_cached(
             total_dataset_lines=total_dataset_lines or manifest.get("n_lines"),
             progress_writer=progress_writer,
             verbose=not quiet,
+            dequant_cache_runtime=dequant_cache_runtime,
         )
     )
+
+    if dequant_cache_runtime is not None:
+        saved_cache = dequant_cache_runtime.save()
+        cache_summary = dequant_cache_runtime.summary()
+        manifest["dequant_cache_stats"] = cache_summary
+        manifest["dequant_cache_terms_final"] = cache_summary["final_terms"]
+        manifest["dequant_cache_hits_total"] = cache_summary["total_cache_hits"]
+        print(
+            f"Dequant cache saved: {saved_cache} | "
+            f"hits initial={cache_summary['initial_hits']} growth={cache_summary['runtime_growth_hits']} "
+            f"llm={cache_summary['llm_calls']} terms+={cache_summary['terms_added_during_run']} "
+            f"final_terms={cache_summary['final_terms']}",
+            flush=True,
+        )
+
+    keys_exhausted = bool(breaker and breaker.get("reason") == "openai_keys_exhausted")
 
     if progress_writer is not None:
         new_df = pd.DataFrame(all_exp)
@@ -1050,6 +1229,20 @@ def run_judging_cached(
         manifest["partial_retry_mode"] = retry_mode
         manifest["only_no_portion"] = retry_mode == "no_portion"
         manifest["only_unresolved"] = retry_mode == "unresolved"
+    total_lines = total_dataset_lines or manifest.get("n_lines") or len(df)
+    if keys_exhausted:
+        mark_openai_partial_manifest(
+            manifest,
+            phase="judging",
+            completed=len(completed_keys(df)),
+            total=int(total_lines),
+            key_status=breaker.get("key_status") if breaker else None,
+        )
+        print_openai_resume_hint(paths["judge_raw"].parent, manifest)
+    else:
+        manifest.pop("status", None)
+        manifest.pop("resume", None)
+        manifest.pop("openai_key_status", None)
     write_manifest(paths["judge_raw"].parent, manifest)
     n_ok = df["llm_fdc_id"].notna().sum()
     print(f"Saved judge results ({len(df)} rows, {n_ok} fdc matches)", flush=True)
@@ -1092,7 +1285,11 @@ def run_feasibility(
     enrichment_concurrency: int = 8,
     sample_manifest: Path | None = None,
     recipe_csv: Path | None = None,
+    sample_lines: int | None = None,
+    sample_seed: int = 42,
     recipe_cache_dir: Path | None = None,
+    dequant_cache_path: Path | None = None,
+    no_dequant_cache: bool = False,
 ) -> dict[str, Any]:
     load_dotenv()
     retry_mode = partial_retry_mode(
@@ -1166,6 +1363,8 @@ def run_feasibility(
             enrichment_concurrency=enrichment_concurrency,
             sample_manifest=sample_manifest,
             recipe_csv=recipe_csv,
+            sample_lines=sample_lines,
+            sample_seed=sample_seed,
             recipe_cache_dir=recipe_cache_dir,
             baseline_dir_resolved=baseline_dir_resolved,
             write_dir=write_dir,
@@ -1177,6 +1376,8 @@ def run_feasibility(
             heartbeat_sec=heartbeat_sec,
             food_cache_dir=food_cache_dir,
             t0=t0,
+            dequant_cache_path=dequant_cache_path,
+            no_dequant_cache=no_dequant_cache,
         )
 
 
@@ -1201,6 +1402,8 @@ def _run_feasibility_pipeline(
     sample_manifest: Path | None,
     recipe_csv: Path | None,
     recipe_cache_dir: Path | None,
+    sample_lines: int | None,
+    sample_seed: int,
     baseline_dir_resolved: Path,
     write_dir: Path,
     paths: dict[str, Path],
@@ -1211,6 +1414,8 @@ def _run_feasibility_pipeline(
     heartbeat_sec: float,
     food_cache_dir: Path,
     t0: float,
+    dequant_cache_path: Path | None = None,
+    no_dequant_cache: bool = False,
 ) -> dict[str, Any]:
     from sample_recipes import DEFAULT_RECIPE_CSV, load_sampled_recipes
 
@@ -1223,6 +1428,12 @@ def _run_feasibility_pipeline(
     if limit is not None:
         recipe_ingredients = recipe_ingredients.head(limit)
 
+    if sample_lines is not None:
+        n_sample = min(int(sample_lines), len(recipe_ingredients))
+        rng = random.Random(int(sample_seed))
+        pick = sorted(rng.sample(range(len(recipe_ingredients)), n_sample))
+        recipe_ingredients = recipe_ingredients.iloc[pick].reset_index(drop=True)
+
     manifest = build_manifest(
         n_recipes=n_recipes,
         seed=seed,
@@ -1230,6 +1441,14 @@ def _run_feasibility_pipeline(
         limit=limit,
         n_lines=len(recipe_ingredients),
     )
+    if sample_lines is not None:
+        manifest["sample_lines"] = int(sample_lines)
+        manifest["sample_seed"] = int(sample_seed)
+        manifest["sampled_line_indices"] = pick
+        manifest["sampled_line_keys"] = [
+            [int(r.recipe_id), int(r.ingredient_idx)]
+            for r in recipe_ingredients.itertuples(index=False)
+        ]
     manifest["run_name"] = f"feasibility_{n_recipes}_seed{seed}"
     if retry_mode is not None:
         manifest["partial_retry_mode"] = retry_mode
@@ -1418,8 +1637,27 @@ def _run_feasibility_pipeline(
             judge_log_every=judge_log_every,
             heartbeat_sec=heartbeat_sec,
             progress_writer=progress_writer,
+            dequant_cache_path=None if no_dequant_cache else dequant_cache_path,
+            no_dequant_cache=no_dequant_cache,
         )
         matches_df = attach_amount_fields(matches_df, amount_df)
+
+        if is_openai_partial_manifest(load_manifest(write_dir)):
+            return _finish_openai_partial_feasibility(
+                amount_df=amount_df,
+                matches_df=matches_df,
+                amount_summary=amount_summary,
+                manifest=manifest,
+                paths=paths,
+                write_dir=write_dir,
+                t0=t0,
+                n_recipes=n_recipes,
+                seed=seed,
+                model=model,
+                sampled_ids=sampled_ids,
+                skip_portion_llm=skip_portion_llm,
+                progress_writer=progress_writer,
+            )
 
         portion_rows_cache: dict[int, list[dict[str, Any]]] | None = None
         llm_scope_keys = retry_keys_for_retrieval if retry_mode is not None else None
@@ -1487,15 +1725,50 @@ def _run_feasibility_pipeline(
                 or not already_done
             )
             if should_run_portion_llm:
-                matches_df = apply_portion_llm_pass(
-                    matches_df,
-                    parsed_lookup,
-                    conn=conn,
-                    model=model,
-                    portion_rows_cache=portion_rows_cache,
-                    progress_writer=progress_writer,
-                    only_keys=llm_scope_keys,
-                )
+                from openai_fallback import AllKeysExhaustedError, get_key_pool_status
+
+                try:
+                    matches_df = apply_portion_llm_pass(
+                        matches_df,
+                        parsed_lookup,
+                        conn=conn,
+                        model=model,
+                        portion_rows_cache=portion_rows_cache,
+                        progress_writer=progress_writer,
+                        only_keys=llm_scope_keys,
+                    )
+                except AllKeysExhaustedError:
+                    mark_openai_partial_manifest(
+                        manifest,
+                        phase="portion_llm",
+                        completed=int(matches_df["portion_resolved_by_llm"].fillna(False).sum())
+                        if "portion_resolved_by_llm" in matches_df.columns
+                        else 0,
+                        total=_count_portion_llm_calls(
+                            matches_df,
+                            conn=conn,
+                            portion_rows_cache=portion_rows_cache,
+                            only_keys=llm_scope_keys,
+                        ),
+                        key_status=get_key_pool_status(),
+                    )
+                    write_manifest(write_dir, manifest)
+                    matches_df.to_parquet(paths["matches"], index=False)
+                    return _finish_openai_partial_feasibility(
+                        amount_df=amount_df,
+                        matches_df=matches_df,
+                        amount_summary=amount_summary,
+                        manifest=manifest,
+                        paths=paths,
+                        write_dir=write_dir,
+                        t0=t0,
+                        n_recipes=n_recipes,
+                        seed=seed,
+                        model=model,
+                        sampled_ids=sampled_ids,
+                        skip_portion_llm=skip_portion_llm,
+                        progress_writer=progress_writer,
+                    )
 
     if progress_writer is not None:
         progress_writer.set_phase("report")
@@ -1534,6 +1807,18 @@ def main() -> None:
     parser.add_argument("--food-cache-dir", type=Path, default=DEFAULT_FOOD_CACHE)
     parser.add_argument("--limit", type=int, default=None, help="Limit ingredient lines for dry run")
     parser.add_argument(
+        "--sample-lines",
+        type=int,
+        default=None,
+        help="Random sample N ingredient lines (after --limit) using --sample-seed",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=42,
+        help="RNG seed for --sample-lines (default: 42)",
+    )
+    parser.add_argument(
         "--retry-limit",
         type=int,
         default=None,
@@ -1568,6 +1853,17 @@ def main() -> None:
         type=Path,
         default=None,
         help="Prior run artifacts to read (default depends on retry mode). Never modified.",
+    )
+    parser.add_argument(
+        "--dequant-cache",
+        type=Path,
+        default=None,
+        help="dequant_norm LLM skip cache JSON (default: data/dequant_norm_llm_cache.json if present)",
+    )
+    parser.add_argument(
+        "--no-dequant-cache",
+        action="store_true",
+        help="Disable dequant_norm cache even if a default file exists",
     )
     parser.add_argument("--no-mlflow", action="store_true", help="Skip MLflow logging")
     parser.add_argument(
@@ -1607,6 +1903,10 @@ def main() -> None:
         retry_limit=args.retry_limit,
         use_mlflow=not args.no_mlflow,
         mlflow_experiment=args.mlflow_experiment,
+        sample_lines=args.sample_lines,
+        sample_seed=args.sample_seed,
+        dequant_cache_path=args.dequant_cache,
+        no_dequant_cache=args.no_dequant_cache,
     )
 
 

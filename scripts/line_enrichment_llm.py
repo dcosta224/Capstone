@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from ingredient_parse_llm import DEFAULT_MODEL, MODEL_PRICING, normalize_ingredient_key
+from openai_fallback import AllKeysExhaustedError
 from resolution_plan import ResolutionPlan, build_resolution_plan, needs_line_enrichment
 
 PROMPT_VERSION = "line_enrichment_v1"
@@ -150,6 +151,8 @@ async def enrich_one_async(
             validation_error = validate_response(parsed)
             if validation_error:
                 error = validation_error
+    except AllKeysExhaustedError:
+        raise
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
 

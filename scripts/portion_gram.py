@@ -138,6 +138,7 @@ COUNT_DESC_RE = re.compile(
 )
 
 SENTINEL_FDC_ID = 999_000_001
+WATER_SENTINEL_FDC_ID = 999_000_002
 
 PORTION_INDEX_SQL = """
 SELECT fp.id, fp.fdc_id, fp.amount, fp.modifier, fp.portion_description,
@@ -824,6 +825,79 @@ def _grams_from_volume_candidate(
     )
 
 
+def _resolve_water_sentinel_grams(
+    quantity: Real | None,
+    unit: str | None,
+    *,
+    name: str | None = None,
+    ingredient_raw: str | None = None,
+    amount_kind: str | None = None,
+) -> PortionGramResult:
+    """Resolve generic water lines to grams (~1 g/ml) for moisture tracking."""
+    if quantity is None:
+        return PortionGramResult(
+            grams=None,
+            status="unmeasurable",
+            unit_kind=None,
+            method="missing quantity",
+        )
+    kind = amount_kind or classify_amount_kind(
+        quantity, unit, name, ingredient_raw=ingredient_raw
+    )
+    q = float(quantity)
+    unit_str = str(unit) if unit is not None else ""
+
+    if kind == "mass":
+        mass_unit = normalize_unit(unit_str) or _normalize_parsed_unit(unit_str) or unit_str
+        try:
+            grams = convert_mass(q, mass_unit, "gram")
+        except UnitConversionError:
+            return PortionGramResult(
+                grams=None,
+                status="bad_unit",
+                unit_kind="mass",
+                method=f"unsupported mass unit {unit_str!r}",
+            )
+        return PortionGramResult(
+            grams=round(grams, 4),
+            status="ok_water_sentinel",
+            unit_kind="mass",
+            method=f"water_sentinel:mass:{unit_str}→g",
+        )
+
+    if kind == "volume":
+        if not unit_str:
+            return PortionGramResult(
+                grams=None,
+                status="bad_unit",
+                unit_kind="volume",
+                method="missing volume unit",
+            )
+        vol_unit = normalize_volume_unit(unit_str) or _normalize_parsed_unit(unit_str) or unit_str
+        try:
+            ml = convert_volume(q, vol_unit, "milliliter")
+        except UnitConversionError:
+            return PortionGramResult(
+                grams=None,
+                status="bad_unit",
+                unit_kind="volume",
+                method=f"unsupported volume unit {unit_str!r}",
+            )
+        return PortionGramResult(
+            grams=round(ml, 4),
+            status="ok_water_sentinel",
+            unit_kind="volume",
+            method=f"water_sentinel:volume:{unit_str}→g",
+        )
+
+    return PortionGramResult(
+        grams=None,
+        status="bad_unit",
+        unit_kind=kind,
+        method=f"water_sentinel:unsupported amount_kind={kind}",
+    )
+
+
 def resolve_grams(
     fdc_id: int | None,
     quantity: Real | None,
@@ -849,6 +923,15 @@ def resolve_grams(
             status="missing_fdc",
             unit_kind=None,
             method="no fdc_id",
+        )
+
+    if int(fdc_id) == WATER_SENTINEL_FDC_ID:
+        return _resolve_water_sentinel_grams(
+            quantity,
+            unit,
+            name=name,
+            ingredient_raw=ingredient_raw,
+            amount_kind=amount_kind,
         )
 
     if quantity is None:
@@ -1284,6 +1367,15 @@ def resolve_grams_from_parsed_row(
         get = row.get
     else:
         get = lambda k, d=None: getattr(row, k, d)
+
+    if fdc_id is not None and int(fdc_id) == WATER_SENTINEL_FDC_ID:
+        return _resolve_water_sentinel_grams(
+            get("quantity"),
+            get("unit"),
+            name=get("name"),
+            ingredient_raw=get("ingredient") or get("ingredient_raw"),
+            amount_kind=get("amount_kind_final") or get("amount_kind"),
+        )
 
     if get("resolution_plan") is not None or get("line_enrichment") is not None:
         plan = plan_from_parsed_row(row)

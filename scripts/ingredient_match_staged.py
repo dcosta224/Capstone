@@ -1138,7 +1138,7 @@ def retrieve_llm_candidates(
             idx for idx, score in lex_scores.items() if score >= rc.lexical_score_floor
         )
 
-    # --- Union + always include staged top-1.
+    # --- Union + include staged top-1 when it satisfies portion-capable filter (if any).
     union: set[int] = semantic_idxs | lexical_idxs
     staged_top1_idx: int | None = None
     if staged_top1_fdc_id is not None:
@@ -1147,7 +1147,8 @@ def retrieve_llm_candidates(
                 staged_top1_idx = idx
                 break
         if staged_top1_idx is not None:
-            union.add(staged_top1_idx)
+            if allowed_fdc_ids is None or int(staged_top1_fdc_id) in allowed_fdc_ids:
+                union.add(staged_top1_idx)
 
     if not union:
         return pd.DataFrame()

@@ -19,7 +19,7 @@ from portion_candidate_index import (
     has_container_mass_portion,
     summarize_fdc_portions,
 )
-from portion_gram import PortionCapabilitySets, SENTINEL_FDC_ID
+from portion_gram import PortionCapabilitySets, SENTINEL_FDC_ID, WATER_SENTINEL_FDC_ID
 from resolution_plan import (
     ResolutionPlan,
     ingredient_has_mass_reference,
@@ -53,7 +53,7 @@ def portion_flag_for_fdc(
     count_fdc_ids: set[int],
     summary_lines: list[PortionSummaryLine] | None = None,
 ) -> str:
-    if int(fdc_id) == SENTINEL_FDC_ID:
+    if int(fdc_id) in (SENTINEL_FDC_ID, WATER_SENTINEL_FDC_ID):
         return "-"
     has_v = int(fdc_id) in volume_fdc_ids
     has_c = int(fdc_id) in count_fdc_ids
@@ -246,19 +246,50 @@ def _attach_portion_scores(
     return out
 
 
+def _filter_to_allowed_fdc_ids(
+    cand_df: pd.DataFrame,
+    allowed_fdc_ids: set[int] | None,
+) -> pd.DataFrame:
+    """Keep only rows whose fdc_id is in the portion-capable allowlist."""
+    if cand_df.empty or allowed_fdc_ids is None:
+        return cand_df
+    mask = cand_df["fdc_id"].astype(int).isin(allowed_fdc_ids)
+    return cand_df.loc[mask].copy()
+
+
+def _portion_viable_mask(
+    cand_df: pd.DataFrame,
+    *,
+    allowed_fdc_ids: set[int] | None,
+) -> pd.Series:
+    """True for candidates with USDA portion data applicable to this amount kind."""
+    if cand_df.empty:
+        return pd.Series(dtype=bool)
+    if allowed_fdc_ids is not None:
+        return cand_df["fdc_id"].astype(int).isin(allowed_fdc_ids)
+    if "portion_match_score" in cand_df.columns:
+        return cand_df["portion_match_score"] > 0
+    return pd.Series(True, index=cand_df.index)
+
+
 def _rank_and_trim(
     cand_df: pd.DataFrame,
     rc: LLMRetrievalConfig,
     *,
     require_portion_match: bool,
+    allowed_fdc_ids: set[int] | None = None,
 ) -> pd.DataFrame:
     if cand_df.empty:
         return cand_df
     pool = cand_df.copy()
-    if require_portion_match:
+    if allowed_fdc_ids is not None:
+        pool = _filter_to_allowed_fdc_ids(pool, allowed_fdc_ids)
+    elif require_portion_match:
         with_match = pool[pool["portion_match_score"] > 0]
         if not with_match.empty:
             pool = with_match
+    if pool.empty:
+        return pool
     pool = pool.sort_values(
         ["blended_score", "retrieval_score", "staged_final_score", "fdc_id"],
         ascending=[False, False, False, True],
@@ -274,19 +305,21 @@ def _ensure_portion_viable_top10(
     ranked: pd.DataFrame,
     cand_df: pd.DataFrame,
     rc: LLMRetrievalConfig,
+    *,
+    allowed_fdc_ids: set[int] | None = None,
 ) -> pd.DataFrame:
     """Prefer portion-viable candidates in top-10; avoid P=- backfill when viable exist."""
     if ranked.empty or cand_df.empty:
         return ranked
 
-    viable = cand_df[cand_df["portion_match_score"] > 0].sort_values(
-        "blended_score", ascending=False
-    )
+    viable_mask = _portion_viable_mask(cand_df, allowed_fdc_ids=allowed_fdc_ids)
+    viable = cand_df.loc[viable_mask].sort_values("blended_score", ascending=False)
     if viable.empty:
         return ranked
 
     prompt = ranked[ranked["in_llm_prompt"]].copy()
-    n_viable_in_prompt = int((prompt["portion_match_score"] > 0).sum())
+    prompt_viable = _portion_viable_mask(prompt, allowed_fdc_ids=allowed_fdc_ids)
+    n_viable_in_prompt = int(prompt_viable.sum())
     target = min(rc.top10_size, max(MIN_PORTION_VIABLE_IN_TOP10, n_viable_in_prompt))
 
     if n_viable_in_prompt >= target:
@@ -298,7 +331,7 @@ def _ensure_portion_viable_top10(
     if extras.empty:
         return ranked
 
-    non_viable = prompt[prompt["portion_match_score"] <= 0].sort_values("rank", ascending=False)
+    non_viable = prompt.loc[~prompt_viable].sort_values("rank", ascending=False)
     drop_n = min(len(extras), len(non_viable))
     if drop_n == 0:
         merged = pd.concat([prompt, extras], ignore_index=True)
@@ -400,6 +433,7 @@ def retrieve_llm_candidates_portion_aware(
         precomputed_sims=precomputed_sims,
         allowed_fdc_ids=allowed_fdc_ids,
     )
+    cand_df = _filter_to_allowed_fdc_ids(cand_df, allowed_fdc_ids)
     n_union = int(cand_df.attrs.get("n_union", 0)) if not cand_df.empty else 0
     tier1_max = float(cand_df["retrieval_score"].max()) if not cand_df.empty else None
 
@@ -436,9 +470,27 @@ def retrieve_llm_candidates_portion_aware(
             query_tokens=tuple(query_tokens),
         )
 
+    micro = is_micro_amount(plan, row_dict, kind)
     cand_df = _attach_portion_scores(cand_df, summary_index, query_tokens, amount_kind=kind)
-    ranked = _rank_and_trim(cand_df, rc, require_portion_match=False)
-    ranked = _ensure_portion_viable_top10(ranked, cand_df, rc)
+    require_portion_pool = (
+        portion_fdc_required and kind in ("volume", "count") and not micro
+    )
+    ranked = _rank_and_trim(
+        cand_df,
+        rc,
+        require_portion_match=require_portion_pool,
+        allowed_fdc_ids=allowed_fdc_ids if require_portion_pool else None,
+    )
+    ranked = _ensure_portion_viable_top10(
+        ranked,
+        cand_df,
+        rc,
+        allowed_fdc_ids=allowed_fdc_ids if require_portion_pool else None,
+    )
+
+    if require_portion_pool and not ranked.empty and allowed_fdc_ids is not None:
+        viable = _portion_viable_mask(ranked, allowed_fdc_ids=allowed_fdc_ids)
+        ranked.loc[~viable, "in_llm_prompt"] = False
 
     ranked = add_portion_flags(
         ranked,
@@ -447,11 +499,41 @@ def retrieve_llm_candidates_portion_aware(
         summary_index=summary_index,
     )
 
-    micro = is_micro_amount(plan, row_dict, kind)
     max_fit = _max_portion_fit_in_prompt(ranked)
+    has_portion_capable_pool = (
+        not cand_df.empty
+        and allowed_fdc_ids is not None
+        and bool(_portion_viable_mask(cand_df, allowed_fdc_ids=allowed_fdc_ids).any())
+    )
     semantic_fallback: pd.DataFrame | None = None
     tier = "portion_ranked"
-    if portion_fdc_required and summary_index and (micro or max_fit <= 0):
+    if portion_fdc_required and summary_index and micro:
+        portion_prompt_ids = set(
+            int(x)
+            for x in ranked.loc[ranked["in_llm_prompt"], "fdc_id"].tolist()
+        ) if not ranked.empty and "in_llm_prompt" in ranked.columns else set()
+        fb = _build_semantic_fallback(
+            query,
+            index,
+            wide_rc,
+            staged_top1_fdc_id=staged_top1_fdc_id,
+            precomputed_sims=precomputed_sims,
+            summary_index=summary_index,
+            query_tokens=query_tokens,
+            amount_kind=kind,
+            volume_fdc_ids=volume_fdc_ids,
+            count_fdc_ids=count_fdc_ids,
+            exclude_fdc_ids=portion_prompt_ids,
+        )
+        if not fb.empty:
+            semantic_fallback = fb
+            tier = "portion_ranked+semantic_fallback"
+    elif (
+        portion_fdc_required
+        and summary_index
+        and max_fit <= 0
+        and not has_portion_capable_pool
+    ):
         portion_prompt_ids = set(
             int(x)
             for x in ranked.loc[ranked["in_llm_prompt"], "fdc_id"].tolist()

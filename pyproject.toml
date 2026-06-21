@@ -18,6 +18,8 @@ dependencies = [
     "strands-agents>=1.40",
     "boto3>=1.35",
     "botocore[crt]>=1.35",
+    "pillow>=12.2.0",
+    "pyparsing>=3.3.2",
 ]
 
 [project.optional-dependencies]

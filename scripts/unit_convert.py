@@ -22,8 +22,7 @@ import re
 from numbers import Real
 from typing import Literal
 
-# Match before bare mass ``oz`` in combined strings like ``fl oz``.
-FLUID_OUNCE_TEXT_RE = re.compile(r"\bfl\.?\s*oz\b|\bfluid\s+ounces?\b", re.IGNORECASE)
+from unit_aliases import FLUID_OUNCE_TEXT_RE, mass_synonyms_for_unit_convert, volume_synonyms_for_unit_convert
 
 UnitKind = Literal["volume", "mass"]
 
@@ -48,65 +47,9 @@ MASS_TO_GRAM: dict[str, float] = {
     "pound": 453.59237,
 }
 
-VOLUME_ALIASES: dict[str, str] = {
-    "tsp": "teaspoon",
-    "tspn": "teaspoon",
-    "teaspoons": "teaspoon",
-    "tbsp": "tablespoon",
-    "tbs": "tablespoon",
-    "tablespoons": "tablespoon",
-    "T": "tablespoon",
-    "t": "teaspoon",
-    "c": "cup",
-    "cup": "cup",
-    "cups": "cup",
-    "pt": "pint",
-    "pints": "pint",
-    "qt": "quart",
-    "qts": "quart",
-    "quarts": "quart",
-    "ml": "milliliter",
-    "milliliter": "milliliter",
-    "milliliters": "milliliter",
-    "millilitre": "milliliter",
-    "millilitres": "milliliter",
-    "l": "liter",
-    "liter": "liter",
-    "liters": "liter",
-    "litre": "liter",
-    "litres": "liter",
-    "fl oz": "fluid_ounce",
-    "floz": "fluid_ounce",
-    "fluid ounce": "fluid_ounce",
-    "fluid ounces": "fluid_ounce",
-    "gal": "gallon",
-    "gallon": "gallon",
-    "gallons": "gallon",
-    "cc": "milliliter",
-    "cubic centimeter": "milliliter",
-    "cubic centimeters": "milliliter",
-    "cubic cm": "milliliter",
-    "cubic inch": "cubic_inch",
-    "cubic inches": "cubic_inch",
-}
+VOLUME_ALIASES: dict[str, str] = volume_synonyms_for_unit_convert()
 
-MASS_ALIASES: dict[str, str] = {
-    "g": "gram",
-    "gram": "gram",
-    "grams": "gram",
-    "kg": "kilogram",
-    "kilogram": "kilogram",
-    "kilograms": "kilogram",
-    "kilo": "kilogram",
-    "kilos": "kilogram",
-    "oz": "ounce",
-    "ounce": "ounce",
-    "ounces": "ounce",
-    "lb": "pound",
-    "lbs": "pound",
-    "pound": "pound",
-    "pounds": "pound",
-}
+MASS_ALIASES: dict[str, str] = mass_synonyms_for_unit_convert()
 
 
 class UnitConversionError(ValueError):

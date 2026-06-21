@@ -32,6 +32,9 @@ from ingredient_match_llm import (
     SENTINEL_DATA_TYPE,
     SENTINEL_DESCRIPTION,
     SENTINEL_FDC_ID,
+    WATER_SENTINEL_DATA_TYPE,
+    WATER_SENTINEL_DESCRIPTION,
+    WATER_SENTINEL_FDC_ID,
     build_food_index,
     compute_report,
     judge_async,
@@ -39,7 +42,13 @@ from ingredient_match_llm import (
     run_judging,
     write_local_reports,
     _append_sentinel_candidate,
+    _append_water_sentinel_candidate,
     _print_budget_abort,
+)
+from generic_ingredient_defaults import (
+    build_hardcoded_judge,
+    inject_default_candidate,
+    lookup_generic_default,
 )
 from ingredient_match_staged import (
     LLMRetrievalConfig,
@@ -72,7 +81,7 @@ from sample_recipes import load_sampled_recipes
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LLM_WORK_DIR = ROOT / "scratch" / "recipe_matching_llm_100_portion"
 MLFLOW_EXPERIMENT = "ingredient_match_llm_portion"
-PROMPT_VERSION = "v6_micro_volume_semantic_fallback"
+PROMPT_VERSION = "v7_generic_defaults_prep_semantic_portion_capable"
 
 SYSTEM_PROMPT = (
     "Match recipe ingredient → USDA fdc_id.\n"
@@ -82,13 +91,15 @@ SYSTEM_PROMPT = (
     "(e.g. white wine vinegar→distilled vinegar). Never substitute different forms "
     "(e.g. garlic powder→garlic raw, dried→fresh). Abstain only if ≥20 kcal expected "
     "and no substitute.\n"
-    "Volume/count: prefer P!=- and fit>0; set matched_portion_id when fit>0.\n"
+    "Volume/count: prefer P!=- and fit>0; set matched_portion_id when fit>0. "
+    "Never pick P=- for volume/count unless negligible_calories.\n"
     "When SEMANTIC_FALLBACK is present and all primary candidates have fit=0, pick "
     "best identity from SEMANTIC_FALLBACK; set negligible_calories=true if this qty "
     "likely <20 kcal and matched_portion_id=null.\n"
     "certainty 0-1 = joint confidence in fdc identity/substitute AND portion-unit fit (lower if either weak).\n"
     "negligible_calories=true only if THIS qty likely <20 kcal. Never flour, sugar, butter, oil.\n"
-    f"Water/ice/plain salt/garnish: {SENTINEL_FDC_ID}. JSON only."
+    f"Plain recipe water (water, cold/hot/boiling water): {WATER_SENTINEL_FDC_ID}. "
+    f"Ice/plain salt/garnish: {SENTINEL_FDC_ID}. JSON only."
 )
 
 
@@ -216,12 +227,21 @@ def precompute_payloads_portion(
                 ).drop_duplicates(subset=["fdc_id"], keep="first")
             else:
                 prompt_for_judge = prompt_candidates
+
+            generic_match = lookup_generic_default(name)
+            hardcoded_judge = None
+            if generic_match is not None:
+                prompt_for_judge = inject_default_candidate(prompt_for_judge, generic_match)
+                hardcoded_judge = build_hardcoded_judge(generic_match)
+
             n_retrieved_candidates = int(len(prompt_for_judge))
             skip_sentinel = (
                 retr.portion_filter_kind in ("volume", "count") and not retr.mass_in_text
             )
             if not skip_sentinel:
                 prompt_for_judge = _append_sentinel_candidate(prompt_for_judge)
+                if generic_match is None or not generic_match.is_water_sentinel:
+                    prompt_for_judge = _append_water_sentinel_candidate(prompt_for_judge)
             valid_fdc_ids = (
                 set(int(x) for x in prompt_for_judge["fdc_id"])
                 if not prompt_for_judge.empty
@@ -329,6 +349,11 @@ def precompute_payloads_portion(
                     "count_fdc_ids": count_fdc_ids,
                     "volume_index": volume_index,
                     "count_index": count_index,
+                    "hardcoded_judge": hardcoded_judge,
+                    "generic_default_key": generic_match.match_key if generic_match else None,
+                    "llm_water_sentinel": bool(
+                        generic_match.is_water_sentinel if generic_match else False
+                    ),
                 }
             )
 
@@ -340,6 +365,69 @@ def precompute_payloads_portion(
         )
 
     return payloads
+
+
+def _fdc_has_portion_for_kind(
+    fdc_id: int,
+    amount_kind: str,
+    *,
+    volume_fdc_ids: set[int],
+    count_fdc_ids: set[int],
+) -> bool:
+    if amount_kind == "volume":
+        return int(fdc_id) in volume_fdc_ids
+    if amount_kind == "count":
+        return int(fdc_id) in count_fdc_ids
+    return True
+
+
+def _rescue_portion_capable_pick(
+    payload: dict[str, Any],
+    llm_fdc_id: int | None,
+    llm_desc: str | None,
+    *,
+    negligible: bool,
+) -> tuple[int | None, str | None]:
+    """Prefer a portion-capable top-10 candidate when the judge pick cannot resolve grams."""
+    amount_kind = str(payload.get("amount_kind") or "")
+    if amount_kind not in ("volume", "count") or payload.get("mass_in_text") or negligible:
+        return llm_fdc_id, llm_desc
+
+    volume_fdc_ids = {int(x) for x in payload.get("volume_fdc_ids") or []}
+    count_fdc_ids = {int(x) for x in payload.get("count_fdc_ids") or []}
+    if llm_fdc_id is not None and _fdc_has_portion_for_kind(
+        llm_fdc_id,
+        amount_kind,
+        volume_fdc_ids=volume_fdc_ids,
+        count_fdc_ids=count_fdc_ids,
+    ):
+        return llm_fdc_id, llm_desc
+
+    viable = [
+        row
+        for row in payload.get("top10_rows") or []
+        if row.get("in_llm_prompt")
+        and _fdc_has_portion_for_kind(
+            int(row["fdc_id"]),
+            amount_kind,
+            volume_fdc_ids=volume_fdc_ids,
+            count_fdc_ids=count_fdc_ids,
+        )
+    ]
+    if not viable:
+        return llm_fdc_id, llm_desc
+
+    best = max(
+        viable,
+        key=lambda row: (
+            float(row.get("portion_match_score") or 0.0),
+            float(row.get("blended_score") or row.get("retrieval_score") or 0.0),
+            float(row.get("retrieval_score") or 0.0),
+        ),
+    )
+    rescued_id = int(best["fdc_id"])
+    rescued_desc = str(best.get("description") or payload.get("prompt_desc", {}).get(rescued_id) or "")
+    return rescued_id, rescued_desc or llm_desc
 
 
 def assemble_rows_portion(
@@ -354,6 +442,14 @@ def assemble_rows_portion(
     llm_fdc_id = judge["fdc_id"]
     llm_fdc_id = int(llm_fdc_id) if llm_fdc_id is not None else None
     llm_desc = payload["prompt_desc"].get(llm_fdc_id) if llm_fdc_id is not None else None
+    negligible = bool(judge.get("negligible_calories", False))
+    if not judge.get("dequant_cache"):
+        llm_fdc_id, llm_desc = _rescue_portion_capable_pick(
+            payload,
+            llm_fdc_id,
+            llm_desc,
+            negligible=negligible,
+        )
 
     parsed_for_resolve = dict(payload["parsed_row"])
     if payload.get("resolution_plan"):
@@ -365,7 +461,7 @@ def assemble_rows_portion(
         portion_index=payload["volume_index"],
         count_portion_index=payload["count_index"],
         matched_portion_id=judge.get("matched_portion_id"),
-        llm_negligible_calories=bool(judge.get("negligible_calories", False)),
+        llm_negligible_calories=negligible,
     )
 
     cost = (
@@ -408,7 +504,17 @@ def assemble_rows_portion(
         "llm_certainty": judge["certainty"],
         "llm_rationale": judge["rationale"],
         "matched_portion_id": judge.get("matched_portion_id"),
-        "llm_negligible_calories": bool(judge.get("negligible_calories", False)),
+        "llm_negligible_calories": negligible,
+        "llm_water_sentinel": bool(
+            judge.get("is_water_sentinel")
+            or payload.get("llm_water_sentinel")
+            or (
+                llm_fdc_id is not None
+                and int(llm_fdc_id) == WATER_SENTINEL_FDC_ID
+            )
+        ),
+        "llm_hardcoded": bool(judge.get("hardcoded")),
+        "generic_default_key": judge.get("generic_default_key") or payload.get("generic_default_key"),
         "llm_pick_has_volume_portion": (
             llm_fdc_id is not None and int(llm_fdc_id) in payload["volume_fdc_ids"]
         ),

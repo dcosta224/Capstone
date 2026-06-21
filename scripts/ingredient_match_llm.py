@@ -55,8 +55,8 @@ from ingredient_query_cache import (
     load_or_build_food_artifacts,
     load_or_build_recipe_artifacts,
 )
-from llm_throttle import throttle_llm_async
 from load_food_4macro import load_food_4macro
+from openai_fallback import AllKeysExhaustedError
 from progress_utils import iter_progress
 from recipe_directions import parse_directions_list, relevant_direction_steps
 from recipe_match_summary import summarize_recipe_matches
@@ -81,7 +81,16 @@ INFERENCES_TABLE = "match_inferences_0"
 # in sync with the row created by sql/31_add_sentinel_food.sql.
 SENTINEL_FDC_ID = 999000001
 SENTINEL_DATA_TYPE = "sentinel"
-SENTINEL_DESCRIPTION = "NON-CALORIC OR NEGLIGIBLE INGREDIENT (water, ice, plain salt, garnish)"
+SENTINEL_DESCRIPTION = "NON-CALORIC OR NEGLIGIBLE INGREDIENT (ice, plain salt, garnish)"
+
+# Separate sentinel for generic water lines (moisture tracking). sql/35_add_water_sentinel_food.sql
+WATER_SENTINEL_FDC_ID = 999000002
+WATER_SENTINEL_DATA_TYPE = "sentinel"
+WATER_SENTINEL_DESCRIPTION = (
+    "WATER (recipe moisture; track separately from negligible salt/garnish)"
+)
+
+SENTINEL_FDC_IDS = frozenset({SENTINEL_FDC_ID, WATER_SENTINEL_FDC_ID})
 
 # OpenAI list pricing (USD per 1M tokens). Update if pricing changes.
 MODEL_PRICING = {
@@ -105,10 +114,13 @@ SYSTEM_PROMPT = (
     "- negligible_calories: true only if this qty likely contributes <20 kcal. Never for flour, sugar, butter, oil.\n"
     "- 'Raw, generic, unbranded' is only a tie-breaker among same-food candidates.\n"
     f"- If no candidate refers to the same food BUT the ingredient is essentially non-caloric "
-    f"or nutritionally negligible (e.g. water, ice, plain salt, a garnish), pick fdc_id "
+    f"or nutritionally negligible (e.g. ice, plain salt, a garnish), pick fdc_id "
     f"{SENTINEL_FDC_ID} (the '{SENTINEL_DESCRIPTION}' entry) and set certainty to reflect how "
     f"sure you are that it carries no meaningful calories. Do not report certainty 0 for "
     f"something inconsequential.\n"
+    f"- Plain recipe water (water, cold/hot/boiling water): pick fdc_id "
+    f"{WATER_SENTINEL_FDC_ID} ('{WATER_SENTINEL_DESCRIPTION}'). Never use the negligible "
+    f"sentinel for water.\n"
     f"- Set fdc_id to null ONLY when no candidate fits AND the ingredient is NOT non-caloric "
     f"(i.e. it has real calories but none of the candidates represent it).\n"
     "Use the recipe steps only as context for how the ingredient is used. Output JSON only."
@@ -189,6 +201,30 @@ def _append_sentinel_candidate(prompt_candidates: pd.DataFrame) -> pd.DataFrame:
         "fdc_id": SENTINEL_FDC_ID,
         "data_type": SENTINEL_DATA_TYPE,
         "description": SENTINEL_DESCRIPTION,
+        "lexical_dequant": 0.0,
+        "dequant_sem": 0.0,
+        "retrieval_score": 0.0,
+        "staged_final_score": 0.0,
+        "staged_base_score": 0.0,
+        "staged_prep_score": 0.0,
+        "is_staged_top1": False,
+        "in_llm_prompt": True,
+    }
+    return pd.concat([prompt_candidates, pd.DataFrame([sentinel])], ignore_index=True)
+
+
+def _append_water_sentinel_candidate(prompt_candidates: pd.DataFrame) -> pd.DataFrame:
+    """Append the water moisture sentinel (distinct from negligible sentinel)."""
+    if not prompt_candidates.empty and (
+        prompt_candidates["fdc_id"].astype(int) == WATER_SENTINEL_FDC_ID
+    ).any():
+        return prompt_candidates
+    next_rank = (int(prompt_candidates["rank"].max()) + 1) if not prompt_candidates.empty else 1
+    sentinel = {
+        "rank": next_rank,
+        "fdc_id": WATER_SENTINEL_FDC_ID,
+        "data_type": WATER_SENTINEL_DATA_TYPE,
+        "description": WATER_SENTINEL_DESCRIPTION,
         "lexical_dequant": 0.0,
         "dequant_sem": 0.0,
         "retrieval_score": 0.0,
@@ -419,6 +455,8 @@ async def judge_async(
             if fdc_id is not None and int(fdc_id) not in valid_fdc_ids:
                 error = "invalid_fdc_id"
                 parsed["fdc_id"] = None
+    except AllKeysExhaustedError:
+        raise
     except Exception as exc:  # network / parse / API error
         error = f"{type(exc).__name__}: {exc}"
 
@@ -545,6 +583,7 @@ async def run_judging(
     disk_flush_every: int = 100,
     total_dataset_lines: int | None = None,
     progress_writer: Any = None,
+    dequant_cache_runtime: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Dispatch concurrent LLM calls; checkpoint in batches; stream observability.
 
@@ -555,7 +594,7 @@ async def run_judging(
     - heartbeat every `heartbeat_sec` seconds even if nothing completed (stalls)
     DB writes are batched via execute_values and flushed every `flush_every`.
     """
-    from openai_fallback import get_async_openai_client
+    from openai_fallback import AllKeysExhaustedError, get_async_openai_client, get_key_pool_status
 
     client = get_async_openai_client()
     sem = asyncio.Semaphore(concurrency)
@@ -567,7 +606,14 @@ async def run_judging(
         if (use_supabase and budget_config is not None)
         else None
     )
-    breaker: dict[str, Any] = {"tripped": False, "verdict": None, "window": None, "skipped": 0}
+    breaker: dict[str, Any] = {
+        "tripped": False,
+        "verdict": None,
+        "window": None,
+        "skipped": 0,
+        "reason": None,
+        "key_status": None,
+    }
 
     all_exp: list[dict[str, Any]] = []
     all_cand: list[dict[str, Any]] = []
@@ -633,6 +679,14 @@ async def run_judging(
                 return payload, None
             stats["active"] += 1
             t0 = time.perf_counter()
+            precomputed = payload.get("hardcoded_judge")
+            if precomputed is None and dequant_cache_runtime is not None:
+                precomputed = dequant_cache_runtime.lookup(payload)
+            if precomputed is not None:
+                judge = dict(precomputed)
+                judge["latency_sec"] = time.perf_counter() - t0
+                stats["active"] -= 1
+                return payload, judge
             try:
                 judge = await judge_async(
                     client,
@@ -641,6 +695,18 @@ async def run_judging(
                     payload["valid_fdc_ids"],
                     system_prompt=system_prompt,
                 )
+            except AllKeysExhaustedError:
+                if not breaker["tripped"]:
+                    breaker["tripped"] = True
+                    breaker["reason"] = "openai_keys_exhausted"
+                    breaker["key_status"] = get_key_pool_status()
+                    if verbose:
+                        print(
+                            "  [openai] All API keys exhausted — halting new LLM calls, "
+                            "draining in-flight requests…",
+                            flush=True,
+                        )
+                return payload, None
             finally:
                 stats["active"] -= 1
             judge["latency_sec"] = time.perf_counter() - t0
@@ -693,6 +759,8 @@ async def run_judging(
             exp, cand_rows = assemble_fn(
                 payload, judge, run_id=run_id, run_name=run_name, model=model, pricing=pricing
             )
+            if dequant_cache_runtime is not None:
+                dequant_cache_runtime.record_completion(payload, judge, exp)
             all_exp.append(exp)
             all_cand.extend(cand_rows)
             buf_exp.append(exp)
@@ -731,6 +799,14 @@ async def run_judging(
 
             if stats["done"] % log_every == 0 and verbose:
                 print(agg_line(">>"), flush=True)
+                if dequant_cache_runtime is not None:
+                    cs = dequant_cache_runtime.summary()
+                    print(
+                        f"  [dequant_cache] initial={cs['initial_hits']} growth={cs['runtime_growth_hits']} "
+                        f"llm={cs['llm_calls']} terms+={cs['terms_added_during_run']} "
+                        f"total_terms={cs['final_terms']}",
+                        flush=True,
+                    )
 
             if (
                 disk_path
@@ -797,7 +873,13 @@ async def run_judging(
     if verbose:
         print(agg_line("== final"), flush=True)
         if breaker["skipped"]:
-            print(f"== budget breaker skipped {breaker['skipped']} un-started calls", flush=True)
+            if breaker.get("reason") == "openai_keys_exhausted":
+                print(
+                    f"== OpenAI key pool exhausted; skipped {breaker['skipped']} un-started calls",
+                    flush=True,
+                )
+            else:
+                print(f"== budget breaker skipped {breaker['skipped']} un-started calls", flush=True)
     return all_exp, all_cand, (breaker if breaker["tripped"] else None)
 
 
