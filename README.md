@@ -95,7 +95,11 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 cd Capstone
 cp .env.example .env   # fill in PG_PASSWORD, PG_POOL_USER, PG_POOL_HOST
 
-uv sync                # create .venv and install locked deps
+# MVP runtime only (~96 packages; matches Docker image)
+uv sync
+
+# Full local environment (notebooks, batch pipeline scripts, tests)
+uv sync --extra notebook --extra pipeline --extra dev
 ```
 
 ### Run scripts inside the project environment
@@ -147,7 +151,8 @@ After any `uv add` / `uv remove`, commit both `pyproject.toml` and `uv.lock`. Te
 
 | Command | What it does |
 |---------|----------------|
-| `uv sync` | Install deps from lockfile into `.venv` |
+| `uv sync` | Install MVP runtime deps from lockfile into `.venv` |
+| `uv sync --extra notebook --extra pipeline --extra dev` | Install notebooks, batch pipeline, and test deps |
 | `uv lock` | Refresh `uv.lock` after hand-editing `pyproject.toml` |
 | `uv pip install -r requirements.txt` | Install from `requirements.txt` if you use that file |
 | `uv run <cmd>` | Run a command in the project environment |
@@ -385,6 +390,83 @@ v4 run artifacts (local, not in git): `scratch/EDA/portion_feasibility_1000_v4_n
 | `portion_resolve_llm.py` | LLM portion pick for `no_portion` rescue |
 | `resolution_plan.py` | Multi-path resolution plans per ingredient line |
 | `feasibility_mlflow.py` | Auto-incrementing `feasibility_version` + MLflow logging |
+
+---
+
+## MVP web app + Strands agent
+
+Interactive recipe recommendation UI backed by the MVP corpus (106 fully gram-resolved recipes).
+
+```bash
+uv run uvicorn mvp_web.server:app --reload --port 8000
+```
+
+Open `http://127.0.0.1:8000`. The `/api/recommend` endpoint streams SSE stages (`embed_query` → `stage1_rank` → `optimize` → `judge` → `format_result`).
+
+**Strands agent (default on `agent_mvp`):** Bedrock (Nova Lite) orchestrates five pipeline tools; OpenAI `gpt-4o-mini` still runs the final judge step.
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `MVP_AGENT_ENABLED` | `1` | Use Strands agent (`0` = legacy `run_pipeline`) |
+| `AWS_REGION` | `us-east-1` | Bedrock region |
+| `BEDROCK_MODEL_ID` | `us.amazon.nova-lite-v1:0` | Orchestrator model |
+| `OPENAI_API_KEY` | — | Judge tool |
+
+Requires `aws login` (or `AWS_PROFILE`) with Bedrock `InvokeModel` access. If the agent stops early, a deterministic tool fallback completes the pipeline.
+
+Agent code: `mvp_agent/` (`tools.py`, `runner.py`, `context.py`).
+
+### Dependencies
+
+| Group | Packages | Used by |
+|-------|----------|---------|
+| **MVP runtime** (`project.dependencies`) | fastapi, uvicorn, numpy, pandas, sentence-transformers, torch (CPU), cvxpy, openai, boto3, strands-agents, psycopg2-binary, pgvector | `mvp_web/`, `mvp_agent/`, `scripts/mvp_*.py` |
+| **notebook** extra | ipykernel, nbformat, matplotlib, plotly | Jupyter notebooks |
+| **pipeline** extra | mlflow, faiss-cpu, scikit-learn, pyarrow, pdfplumber, … | Batch loaders, EDA, feasibility scripts |
+| **dev** extra | pytest | Unit tests |
+
+### Docker
+
+CPU-only PyTorch (no CUDA/NVIDIA wheels). Build and push to ECR:
+
+```bash
+chmod +x scripts/deploy/push_mvp_ecr.sh
+./scripts/deploy/push_mvp_ecr.sh
+```
+
+Build and run locally (requires `.env` with Supabase credentials):
+
+```bash
+docker build -t capstone-mvp:local .
+docker run --rm -p 8000:8000 --env-file .env capstone-mvp:local
+```
+
+On Apple Silicon targeting x86 ECS/Fargate, add `--platform linux/amd64` to `docker build`.
+
+Smoke test:
+
+```bash
+curl -s http://localhost:8000/health | python -m json.tool
+```
+
+Push to ECR:
+
+```bash
+export AWS_REGION=us-east-1
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ECR_REPO=capstone-mvp
+
+aws ecr create-repository --repository-name $ECR_REPO --region $AWS_REGION  # once
+aws ecr get-login-password --region $AWS_REGION | \
+  docker login --username AWS --password-stdin \
+  $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+docker tag capstone-mvp:local \
+  $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+```
+
+Secrets (`.env`) are passed at runtime, not baked into the image. Corpus cache is built at startup from Supabase.
 
 ---
 

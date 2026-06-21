@@ -1,0 +1,17 @@
+[Unit]
+Description=Capstone MVP Web (FastAPI + uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/capstone
+Environment=PATH=/home/ec2-user/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/opt/capstone/.env
+ExecStart=/home/ec2-user/.local/bin/uv run uvicorn mvp_web.server:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

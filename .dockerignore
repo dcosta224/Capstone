@@ -1,0 +1,40 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pip_packages/
+.cursor/
+
+# Git / IDE
+.git/
+.gitignore
+.DS_Store
+
+# Secrets
+.env
+deploy/aws.env
+
+# Data and generated artifacts
+Data/
+scratch/
+notebooks/
+tests/
+sql/
+infra/
+docs/
+deploy/
+mlruns/
+mlartifacts/
+mlflow.db
+mvp_web/cache/
+
+*.csv
+*.txt
+*.png
+*.npy
+*.parquet
+*.pkl
+*.ipynb
+
+# Installers
+AWSCLIV2.pkg
