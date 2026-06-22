@@ -20,6 +20,7 @@ dependencies = [
     "botocore[crt]>=1.35",
     "pillow>=12.2.0",
     "pyparsing>=3.3.2",
+    "ipywidgets>=8.1.8",
 ]
 
 [project.optional-dependencies]
