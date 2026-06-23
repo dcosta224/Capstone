@@ -23,6 +23,7 @@ deploy/aws.env
 
 # Runtime caches
 mvp_web/cache/
+foodon_web/cache/
 
 # Large generated scratch artifacts (EDA notebooks may be tracked individually)
 scratch/colab_bundle_staging/

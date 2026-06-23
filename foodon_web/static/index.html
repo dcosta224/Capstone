@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FoodOn Browser</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>FoodOn Browser</h1>
+      <p>Traverse the FoodOn ontology. Expand categories to browse subcategories; counts show total descendants.</p>
+    </header>
+
+    <section class="panel search-panel">
+      <label for="search-input">Search classes</label>
+      <div class="search-row">
+        <input id="search-input" type="search" placeholder="e.g. romano cheese, tomato" autocomplete="off" />
+        <button id="search-btn" type="button">Search</button>
+      </div>
+      <div id="search-results" class="search-results hidden"></div>
+    </section>
+
+    <section class="panel tree-panel">
+      <div class="tree-toolbar">
+        <h2>Hierarchy</h2>
+        <span id="status-text" class="status-text">Loading ontology…</span>
+      </div>
+      <div id="tree-root" class="tree-root" role="tree" aria-label="FoodOn class hierarchy"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
