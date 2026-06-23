@@ -15,7 +15,13 @@ MERGE_KEYS = ("recipe_id", "ingredient_idx")
 def load_judge_checkpoint(path: Path) -> pd.DataFrame:
     if not path.is_file():
         return pd.DataFrame()
-    return pd.read_parquet(path)
+    try:
+        return pd.read_parquet(path)
+    except Exception:
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        if tmp_path.is_file():
+            return pd.read_parquet(tmp_path)
+        raise
 
 
 def completed_keys(df: pd.DataFrame) -> set[tuple[int, int]]:
@@ -51,7 +57,9 @@ def merge_judge_checkpoint(path: Path, new_rows: list[dict[str, Any]]) -> int:
         ]
         merged = pd.concat([keep, incoming], ignore_index=True)
     path.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_parquet(path, index=False)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    merged.to_parquet(tmp_path, index=False)
+    tmp_path.replace(path)
     return len(merged)
 
 

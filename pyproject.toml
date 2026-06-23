@@ -22,12 +22,16 @@ dependencies = [
     "pyparsing>=3.3.2",
     "ipywidgets>=8.1.8",
     "rdflib>=7.6.0",
+    "ipykernel>=7.3.0",
+    "matplotlib>=3.11.0",
+    "rapidfuzz>=3.14.5",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
 notebook = [
+    "ingredient-parser-nlp>=2.7.0",
     "ipykernel>=7.2.0",
     "nbformat>=5.10.0",
     "matplotlib>=3.10.9",

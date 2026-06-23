@@ -152,6 +152,39 @@ def load_manifest(out_dir: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text())
 
 
+def _line_keys(df: pd.DataFrame) -> set[tuple[int, int]]:
+    return {
+        (int(r.recipe_id), int(r.ingredient_idx))
+        for r in df.itertuples(index=False)
+    }
+
+
+def _artifact_line_keys(paths: dict[str, Path]) -> set[tuple[int, int]] | None:
+    """Line keys from judge resume artifacts (payloads or checkpoint)."""
+    if paths["judge_raw"].is_file():
+        return _line_keys(load_judge_checkpoint(paths["judge_raw"]))
+    if paths["payloads"].is_file():
+        with paths["payloads"].open("rb") as f:
+            payloads = pickle.load(f)
+        if payloads:
+            return {
+                (int(p["recipe_id"]), int(p["ingredient_idx"]))
+                for p in payloads
+            }
+    return None
+
+
+def _merge_amount_frames(base: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    incoming_keys = _line_keys(incoming)
+    keep = base[
+        ~base.apply(
+            lambda r: (int(r.recipe_id), int(r.ingredient_idx)) in incoming_keys,
+            axis=1,
+        )
+    ]
+    return pd.concat([keep, incoming], ignore_index=True)
+
+
 def manifest_matches(
     saved: dict[str, Any] | None,
     current: dict[str, Any],
@@ -406,14 +439,27 @@ def load_or_classify_amounts(
     retry_limit: int | None = None,
     progress_writer: Any = None,
     enrichment_concurrency: int = 8,
+    artifact_keys: set[tuple[int, int]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     saved = load_manifest(paths["amount"].parent)
+    existing_amount: pd.DataFrame | None = None
+    existing_keys: set[tuple[int, int]] = set()
+    if paths["amount"].is_file():
+        existing_amount = pd.read_parquet(paths["amount"])
+        existing_keys = _line_keys(existing_amount)
+
+    keys_needed = artifact_keys or existing_keys
+    cache_compatible = (
+        retry_mode is not None or manifest_compatible_for_cache(saved, manifest)
+    )
+    cache_covers_artifacts = artifact_keys is None or artifact_keys <= existing_keys
     if (
         not force
-        and paths["amount"].is_file()
-        and (retry_mode is not None or manifest_compatible_for_cache(saved, manifest))
+        and existing_amount is not None
+        and cache_covers_artifacts
+        and (cache_compatible or (keys_needed and keys_needed <= existing_keys))
     ):
-        amount_df = pd.read_parquet(paths["amount"])
+        amount_df = existing_amount
         amount_llm_df = (
             pd.read_parquet(paths["amount_llm"])
             if paths["amount_llm"].is_file()
@@ -430,6 +476,56 @@ def load_or_classify_amounts(
         }
         print(f"Loaded cached amount classification ({len(amount_df)} lines)", flush=True)
         return amount_df, amount_llm_df, summary
+
+    if existing_amount is not None and keys_needed:
+        missing_keys = keys_needed - existing_keys
+        if missing_keys:
+            to_classify = recipe_ingredients[
+                recipe_ingredients.apply(
+                    lambda r: (int(r.recipe_id), int(r.ingredient_idx)) in missing_keys,
+                    axis=1,
+                )
+            ].reset_index(drop=True)
+            if not to_classify.empty:
+                print(
+                    f"Merging amount classification: {len(existing_keys)} cached, "
+                    f"classifying {len(to_classify)} missing line(s)",
+                    flush=True,
+                )
+                new_df, new_llm_df, new_summary = classify_ingredient_lines(
+                    to_classify,
+                    model=model,
+                    progress_writer=progress_writer,
+                    enrichment_concurrency=enrichment_concurrency,
+                )
+                amount_df = _merge_amount_frames(existing_amount, new_df)
+                amount_llm_df = (
+                    pd.read_parquet(paths["amount_llm"])
+                    if paths["amount_llm"].is_file()
+                    else pd.DataFrame()
+                )
+                if not new_llm_df.empty:
+                    amount_llm_df = (
+                        pd.concat([amount_llm_df, new_llm_df], ignore_index=True)
+                        if not amount_llm_df.empty
+                        else new_llm_df
+                    )
+                amount_df.to_parquet(paths["amount"], index=False)
+                if not amount_llm_df.empty:
+                    amount_llm_df.to_parquet(paths["amount_llm"], index=False)
+                write_manifest(paths["amount"].parent, manifest)
+                summary = {
+                    "n_lines": len(amount_df),
+                    "amount_kind_final_counts": amount_df["amount_kind_final"].value_counts().to_dict(),
+                    "amount_kind_source_counts": amount_df["amount_kind_source"].value_counts().to_dict(),
+                    "n_needs_portion": int(amount_df["needs_portion"].sum()),
+                    "n_unknown_rules": int((amount_df["amount_kind"] == "unknown").sum()),
+                    "n_llm_line_enrichment_calls": len(amount_llm_df),
+                    "merged_from_cache": len(existing_keys),
+                    "newly_classified": len(to_classify),
+                }
+                print(f"Amount classification: {summary}", flush=True)
+                return amount_df, amount_llm_df, summary
 
     only_enrich_keys: set[tuple[int, int]] | None = None
     if retry_mode is not None and baseline_paths is not None:
@@ -716,18 +812,23 @@ def enrich_matches_with_rules_grams(
 
 
 def attach_amount_fields(matches_df: pd.DataFrame, amount_df: pd.DataFrame) -> pd.DataFrame:
-    kind_lookup = amount_df.set_index(["recipe_id", "ingredient_idx"])
-    out = matches_df.copy()
-    for col, src in (
-        ("amount_kind_final", "amount_kind_final"),
-        ("amount_kind_rules", "amount_kind"),
-        ("amount_kind_source", "amount_kind_source"),
-        ("needs_portion", "needs_portion"),
-    ):
-        out[col] = [
-            kind_lookup.loc[(int(r.recipe_id), int(r.ingredient_idx)), src]
-            for r in out.itertuples(index=False)
+    lookup = amount_df[
+        [
+            "recipe_id",
+            "ingredient_idx",
+            "amount_kind_final",
+            "amount_kind",
+            "amount_kind_source",
+            "needs_portion",
         ]
+    ].rename(columns={"amount_kind": "amount_kind_rules"})
+    out = matches_df.merge(lookup, on=["recipe_id", "ingredient_idx"], how="left")
+    missing = int(out["amount_kind_final"].isna().sum())
+    if missing:
+        raise KeyError(
+            f"amount classification missing for {missing} judge row(s); "
+            "re-run amount classification for the full chunk before attaching"
+        )
     return out
 
 
@@ -954,12 +1055,22 @@ def _finish_feasibility_run(
 
 
 def _load_payloads(paths: dict[str, Path], manifest: dict[str, Any], force: bool) -> list[dict] | None:
-    saved = load_manifest(paths["payloads"].parent)
-    if force or not paths["payloads"].is_file() or not manifest_compatible_for_cache(saved, manifest):
+    if force or not paths["payloads"].is_file():
         return None
-    print(f"Loaded cached payloads ({paths['payloads'].stat().st_size // 1024} KB)", flush=True)
+    saved = load_manifest(paths["payloads"].parent)
     with paths["payloads"].open("rb") as f:
-        return pickle.load(f)
+        payloads = pickle.load(f)
+    if manifest_compatible_for_cache(saved, manifest):
+        print(f"Loaded cached payloads ({paths['payloads'].stat().st_size // 1024} KB)", flush=True)
+        return payloads
+    if paths["judge_raw"].is_file():
+        print(
+            f"Loaded cached payloads for judge resume "
+            f"({len(payloads)} rows, manifest config changed)",
+            flush=True,
+        )
+        return payloads
+    return None
 
 
 def _save_payloads(paths: dict[str, Path], payloads: list[dict]) -> None:
@@ -1124,37 +1235,41 @@ def run_judging_cached(
         )
     elif not force and not cache_path.is_file() and paths["matches"].is_file() and manifest_compatible_for_cache(saved, manifest):
         cache_path = paths["matches"]
-    elif not force and cache_path.is_file() and manifest_compatible_for_cache(saved, manifest) and retry_mode is None:
+    elif not force and cache_path.is_file() and retry_mode is None:
         cached_df = load_judge_checkpoint(cache_path)
-        if cache_path == paths["matches"] and not paths["judge_raw"].is_file():
-            judge_cols = [c for c in cached_df.columns if c not in (
-                "rules_grams", "rules_grams_status", "rules_grams_method",
-                "usda_portion_available", "portion_resolved_by_llm",
-            )]
-            cached_df[judge_cols].to_parquet(paths["judge_raw"], index=False)
-            cache_path = paths["judge_raw"]
-            cached_df = load_judge_checkpoint(cache_path)
-            print("Migrated judge cache → judge_matches_raw.parquet", flush=True)
-        n_expected = len(payloads)
-        n_cached = len(cached_df)
-        if not is_openai_partial_manifest(saved) and n_cached >= n_expected and n_expected > 0:
-            n_ok = cached_df["llm_fdc_id"].notna().sum() if "llm_fdc_id" in cached_df.columns else 0
-            print(f"Loaded cached judge results ({n_cached} rows, {n_ok} fdc matches)", flush=True)
-            return cached_df
-        if n_cached > 0 and n_cached < n_expected:
-            skip = completed_keys(cached_df)
-            payloads = _filter_payloads(payloads, skip_keys=skip)
-            base_df = cached_df
-            reason = (
-                "OpenAI key exhaustion"
-                if is_openai_partial_manifest(saved)
-                else "interrupted run"
-            )
-            print(
-                f"Resuming judge after {reason}: "
-                f"{len(skip)} done, {len(payloads)} pending (of {n_expected} total payloads)",
-                flush=True,
-            )
+        resume_ok = manifest_compatible_for_cache(saved, manifest) or (
+            not cached_df.empty and paths["payloads"].is_file()
+        )
+        if resume_ok:
+            if cache_path == paths["matches"] and not paths["judge_raw"].is_file():
+                judge_cols = [c for c in cached_df.columns if c not in (
+                    "rules_grams", "rules_grams_status", "rules_grams_method",
+                    "usda_portion_available", "portion_resolved_by_llm",
+                )]
+                cached_df[judge_cols].to_parquet(paths["judge_raw"], index=False)
+                cache_path = paths["judge_raw"]
+                cached_df = load_judge_checkpoint(cache_path)
+                print("Migrated judge cache → judge_matches_raw.parquet", flush=True)
+            n_expected = len(payloads)
+            n_cached = len(cached_df)
+            if not is_openai_partial_manifest(saved) and n_cached >= n_expected and n_expected > 0:
+                n_ok = cached_df["llm_fdc_id"].notna().sum() if "llm_fdc_id" in cached_df.columns else 0
+                print(f"Loaded cached judge results ({n_cached} rows, {n_ok} fdc matches)", flush=True)
+                return cached_df
+            if n_cached > 0 and n_cached < n_expected:
+                skip = completed_keys(cached_df)
+                payloads = _filter_payloads(payloads, skip_keys=skip)
+                base_df = cached_df
+                reason = (
+                    "OpenAI key exhaustion"
+                    if is_openai_partial_manifest(saved)
+                    else "interrupted run"
+                )
+                print(
+                    f"Resuming judge after {reason}: "
+                    f"{len(skip)} done, {len(payloads)} pending (of {n_expected} total payloads)",
+                    flush=True,
+                )
 
     if not payloads:
         if not base_df.empty:
@@ -1578,10 +1693,31 @@ def _run_feasibility_pipeline(
             },
         )
 
+    artifact_keys = _artifact_line_keys(paths)
+    amount_ingredients = recipe_ingredients
+    if (
+        artifact_keys
+        and skip_resolved_in_db
+        and sample_manifest is not None
+        and paths["amount"].is_file()
+    ):
+        existing_keys = _line_keys(pd.read_parquet(paths["amount"]))
+        if artifact_keys - existing_keys:
+            from sample_recipes import DEFAULT_RECIPE_CSV
+
+            _, amount_ingredients, _ = load_sampled_recipes(
+                n=n_recipes,
+                seed=seed,
+                sample_manifest=sample_manifest,
+                recipe_csv=recipe_csv or DEFAULT_RECIPE_CSV,
+            )
+            if limit is not None:
+                amount_ingredients = amount_ingredients.head(limit)
+
     if progress_writer is not None:
-        progress_writer.set_phase("amount_classify", total=len(recipe_ingredients))
+        progress_writer.set_phase("amount_classify", total=len(amount_ingredients))
     amount_df, amount_llm_df, amount_summary = load_or_classify_amounts(
-        recipe_ingredients,
+        amount_ingredients,
         model=model,
         paths=paths,
         manifest=manifest,
@@ -1591,6 +1727,7 @@ def _run_feasibility_pipeline(
         retry_limit=retry_limit,
         progress_writer=progress_writer,
         enrichment_concurrency=enrichment_concurrency,
+        artifact_keys=artifact_keys,
     )
 
     if progress_writer is not None:

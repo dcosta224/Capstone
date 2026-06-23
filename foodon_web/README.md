@@ -31,6 +31,31 @@ Or:
 
 Then open **http://127.0.0.1:8765** in your browser.
 
+### Spaghetti Carbonara composition explorer
+
+Open **http://127.0.0.1:8765/carbonara** for an interactive view of resolved ingredient gram shares mapped to FoodOn:
+
+- **Chart (top):** wide distribution — 1 selected node = gram-share %; 2 nodes = gram ratio
+- **Tree (bottom):** tournament-style bracket, root at top, same depth = same row, labels truncated to 20 chars
+
+### Permanent Carbonara data (no remapping on reload)
+
+The UI reads committed JSON from `foodon_web/data/`:
+
+- `carbonara_composition_top12.json` — full API payload (grams, hierarchy, stats)
+- `carbonara_fdc_foodon_map.json` — frozen FDC→FoodOn lookups for this dish
+
+**UI/layout changes do not trigger remapping.** Only a missing bundled file falls back to the DB + slow FoodOn search.
+
+To regenerate after resolution data changes:
+
+```bash
+uv run python scripts/build_carbonara_foodon_cache.py
+git add foodon_web/data/
+```
+
+Optional dev cache under `foodon_web/cache/` is gitignored; the bundled `data/` files are what matter.
+
 ### First run vs later runs
 
 - **First run** downloads `foodon.owl` from OBO and builds a local index. This usually takes 10–20 seconds.
