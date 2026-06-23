@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS recipe.resolved_recipes (
     gram_weight           double precision NOT NULL,
     amount_kind           text,
     grams_status          text,
+    negligible_calories   boolean NOT NULL DEFAULT false,
     feasibility_version   integer,
     loaded_at             timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (recipe_id, ingredient_idx)

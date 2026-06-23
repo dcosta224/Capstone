@@ -64,6 +64,87 @@ def no_portion_rate(df: pd.DataFrame) -> tuple[int, int, float]:
     return nop, total, nop / max(total, 1)
 
 
+def combine_judged_checkpoint(
+    disk_path: Path | None,
+    session_rows: list[dict[str, Any]] | None = None,
+    *,
+    baseline_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Merge baseline, on-disk checkpoint, and in-session rows (last wins per line key)."""
+    parts: list[pd.DataFrame] = []
+    if baseline_df is not None and not baseline_df.empty:
+        parts.append(baseline_df)
+    if disk_path is not None and disk_path.is_file():
+        parts.append(load_judge_checkpoint(disk_path))
+    if session_rows:
+        parts.append(pd.DataFrame(session_rows))
+    if not parts:
+        return pd.DataFrame()
+    merged = pd.concat(parts, ignore_index=True)
+    if merged.empty:
+        return merged
+    return merged.drop_duplicates(subset=list(MERGE_KEYS), keep="last")
+
+
+def fully_judged_resolution_stats(
+    judged_df: pd.DataFrame,
+    expected_lines_per_recipe: dict[int, int],
+) -> dict[str, Any]:
+    """Among recipes with every expected line judged, count those fully resolved.
+
+    A line is *resolved* when it has a real fdc_id and non-null grams (see
+  ``recipe_complete_rate.line_fully_resolved``).
+    """
+    if not expected_lines_per_recipe:
+        return {
+            "n_fully_judged": 0,
+            "n_fully_judged_resolved": 0,
+            "fully_judged_resolved_pct": 0.0,
+            "n_recipes_total": 0,
+        }
+    from recipe_complete_rate import line_fully_resolved
+
+    n_fully_judged = 0
+    n_fully_judged_resolved = 0
+    if judged_df.empty:
+        return {
+            "n_fully_judged": 0,
+            "n_fully_judged_resolved": 0,
+            "fully_judged_resolved_pct": 0.0,
+            "n_recipes_total": len(expected_lines_per_recipe),
+        }
+
+    judged = judged_df.copy()
+    judged["recipe_id"] = judged["recipe_id"].astype(int)
+
+    for rid, expected in expected_lines_per_recipe.items():
+        sub = judged[judged["recipe_id"] == int(rid)]
+        if len(sub) < int(expected):
+            continue
+        n_fully_judged += 1
+        if all(line_fully_resolved(row) for row in sub.itertuples(index=False)):
+            n_fully_judged_resolved += 1
+
+    pct = 100.0 * n_fully_judged_resolved / max(n_fully_judged, 1)
+    return {
+        "n_fully_judged": n_fully_judged,
+        "n_fully_judged_resolved": n_fully_judged_resolved,
+        "fully_judged_resolved_pct": round(pct, 1),
+        "n_recipes_total": len(expected_lines_per_recipe),
+    }
+
+
+def format_fully_judged_resolution_suffix(stats: dict[str, Any]) -> str:
+    """Console fragment for judge progress lines."""
+    n_judged = stats["n_fully_judged"]
+    if n_judged == 0:
+        return " | fully-judged resolved n/a (0 recipes complete)"
+    return (
+        f" | fully-judged resolved {stats['fully_judged_resolved_pct']:.1f}% "
+        f"({stats['n_fully_judged_resolved']}/{n_judged})"
+    )
+
+
 def _json_default(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()

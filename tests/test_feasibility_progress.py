@@ -10,21 +10,32 @@ from pathlib import Path
 
 import pytest
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from feasibility_progress import FeasibilityProgressWriter
-from judge_checkpoint import append_judge_jsonl, compact_jsonl_to_parquet, load_judge_checkpoint
+from judge_checkpoint import (
+    append_judge_jsonl,
+    combine_judged_checkpoint,
+    compact_jsonl_to_parquet,
+    format_fully_judged_resolution_suffix,
+    fully_judged_resolution_stats,
+    load_judge_checkpoint,
+    merge_judge_checkpoint,
+)
 
 
-def _row(recipe_id: int, ingredient_idx: int) -> dict:
+def _row(recipe_id: int, ingredient_idx: int, *, grams: float | None = 100.0) -> dict:
     ts = datetime(2025, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
     return {
         "recipe_id": recipe_id,
         "ingredient_idx": ingredient_idx,
         "ingredient": "flour",
         "llm_fdc_id": 100 + ingredient_idx,
-        "grams_status": "resolved",
+        "grams": grams,
+        "grams_status": "resolved" if grams is not None else "no_portion",
         "ts": ts,
         "inferred_at": "2025-06-15T12:00:00Z",
     }
@@ -171,3 +182,48 @@ def test_run_judging_with_progress_writer(tmp_path: Path, monkeypatch: pytest.Mo
     assert len(load_judge_checkpoint(disk_path)) == 2
     progress = json.loads((tmp_path / "progress.json").read_text())
     assert progress["judging"]["done"] == 2
+
+
+def test_fully_judged_resolution_stats_all_resolved() -> None:
+    judged = pd.DataFrame([_row(1, 0), _row(1, 1), _row(2, 0)])
+    expected = {1: 2, 2: 1}
+    stats = fully_judged_resolution_stats(judged, expected)
+    assert stats["n_fully_judged"] == 2
+    assert stats["n_fully_judged_resolved"] == 2
+    assert stats["fully_judged_resolved_pct"] == 100.0
+
+
+def test_fully_judged_resolution_stats_partial_recipe_excluded() -> None:
+    judged = pd.DataFrame([_row(1, 0)])
+    expected = {1: 2}
+    stats = fully_judged_resolution_stats(judged, expected)
+    assert stats["n_fully_judged"] == 0
+    assert stats["fully_judged_resolved_pct"] == 0.0
+
+
+def test_fully_judged_resolution_stats_unresolved_line() -> None:
+    judged = pd.DataFrame([_row(1, 0), _row(1, 1, grams=None)])
+    expected = {1: 2}
+    stats = fully_judged_resolution_stats(judged, expected)
+    assert stats["n_fully_judged"] == 1
+    assert stats["n_fully_judged_resolved"] == 0
+    assert stats["fully_judged_resolved_pct"] == 0.0
+
+
+def test_combine_judged_checkpoint_last_wins(tmp_path: Path) -> None:
+    parquet = tmp_path / "judge_matches_raw.parquet"
+    merge_judge_checkpoint(parquet, [_row(1, 0, grams=50.0)])
+    combined = combine_judged_checkpoint(parquet, [_row(1, 0, grams=200.0)])
+    assert len(combined) == 1
+    assert float(combined.iloc[0]["grams"]) == 200.0
+
+
+def test_format_fully_judged_resolution_suffix() -> None:
+    assert "n/a" in format_fully_judged_resolution_suffix(
+        {"n_fully_judged": 0, "n_fully_judged_resolved": 0, "fully_judged_resolved_pct": 0.0}
+    )
+    suffix = format_fully_judged_resolution_suffix(
+        {"n_fully_judged": 4, "n_fully_judged_resolved": 3, "fully_judged_resolved_pct": 75.0}
+    )
+    assert "75.0%" in suffix
+    assert "(3/4)" in suffix

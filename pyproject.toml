@@ -21,6 +21,7 @@ dependencies = [
     "pillow>=12.2.0",
     "pyparsing>=3.3.2",
     "ipywidgets>=8.1.8",
+    "rdflib>=7.6.0",
 ]
 
 [project.optional-dependencies]

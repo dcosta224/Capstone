@@ -582,6 +582,8 @@ async def run_judging(
     disk_checkpoint_path: Any = None,
     disk_flush_every: int = 100,
     total_dataset_lines: int | None = None,
+    expected_lines_per_recipe: dict[int, int] | None = None,
+    baseline_judge_df: Any = None,
     progress_writer: Any = None,
     dequant_cache_runtime: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
@@ -643,6 +645,26 @@ async def run_judging(
             return str(ts_time)
         return ""
 
+    def _resolution_suffix() -> str:
+        if not expected_lines_per_recipe:
+            return ""
+        try:
+            from judge_checkpoint import (
+                combine_judged_checkpoint,
+                format_fully_judged_resolution_suffix,
+                fully_judged_resolution_stats,
+            )
+
+            judged_df = combine_judged_checkpoint(
+                disk_path,
+                all_exp,
+                baseline_df=baseline_judge_df,
+            )
+            res_stats = fully_judged_resolution_stats(judged_df, expected_lines_per_recipe)
+            return format_fully_judged_resolution_suffix(res_stats)
+        except Exception:
+            return ""
+
     def agg_line(tag: str) -> str:
         done = stats["done"]
         rate = done / max(time.time() - t_start, 1e-6)
@@ -664,7 +686,7 @@ async def run_judging(
             f"{tag} {done}/{total} ({done / total:.0%}) | {rate:.1f}/s ETA {eta:4.0f}s | "
             f"${stats['cost']:.4f} {stats['tokens']:,}tok | "
             f"agree {stats['agree'] / max(done,1):.0%} abstain {stats['abstain'] / max(done,1):.0%} "
-            f"err {stats['errors']} | {nop_run}{nop_overall} | "
+            f"err {stats['errors']} | {nop_run}{nop_overall}{_resolution_suffix()} | "
             f"lat p50 {p50:.2f}s p95 {p95:.2f}s | "
             f"inflight {stats['active']}/{concurrency} | ckpt {stats['checkpointed']}"
         )
@@ -719,17 +741,36 @@ async def run_judging(
     def flush_disk(exp_rows):
         if not disk_path or not exp_rows:
             return
-        from judge_checkpoint import merge_judge_checkpoint, no_portion_rate
+        from judge_checkpoint import (
+            combine_judged_checkpoint,
+            format_fully_judged_resolution_suffix,
+            fully_judged_resolution_stats,
+            merge_judge_checkpoint,
+            no_portion_rate,
+        )
 
         n_disk = merge_judge_checkpoint(disk_path, exp_rows)
         on_disk = pd.read_parquet(disk_path)
         _, _, rate_all = no_portion_rate(on_disk)
         denom = total_dataset_lines or n_disk
         nop = int(on_disk["grams_status"].eq("no_portion").sum())
+        resolution_suffix = ""
+        if expected_lines_per_recipe:
+            judged_df = combine_judged_checkpoint(
+                disk_path,
+                None,
+                baseline_df=baseline_judge_df,
+            )
+            resolution_suffix = format_fully_judged_resolution_suffix(
+                fully_judged_resolution_stats(judged_df, expected_lines_per_recipe)
+            )
+        if dequant_cache_runtime is not None:
+            dequant_cache_runtime.save()
         if verbose:
             print(
                 f"  .. checkpointed {len(exp_rows)} rows -> disk "
-                f"(total {n_disk}/{denom}, no_portion {nop / max(denom, 1):.1%})",
+                f"(total {n_disk}/{denom}, no_portion {nop / max(denom, 1):.1%})"
+                f"{resolution_suffix}",
                 flush=True,
             )
 

@@ -166,6 +166,16 @@ def manifest_matches(
     return saved == current
 
 
+def manifest_compatible_for_cache(
+    saved: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> bool:
+    """True when artifacts from a prior run (possibly partial) match *current* config."""
+    if saved is None:
+        return False
+    return all(saved.get(k) == v for k, v in current.items())
+
+
 def write_manifest(out_dir: Path, manifest: dict[str, Any]) -> None:
     (out_dir / MANIFEST_PATH).write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -401,7 +411,7 @@ def load_or_classify_amounts(
     if (
         not force
         and paths["amount"].is_file()
-        and (retry_mode is not None or manifest_matches(saved, manifest))
+        and (retry_mode is not None or manifest_compatible_for_cache(saved, manifest))
     ):
         amount_df = pd.read_parquet(paths["amount"])
         amount_llm_df = (
@@ -753,9 +763,21 @@ def build_feasibility_report(
     needs_both = needs_fdc & needs_grams
 
     needs_with_fdc = needs[needs["llm_fdc_id"].notna()]
-    usda_avail = needs_with_fdc["usda_portion_available"].fillna(False)
-    rules_ok = needs_with_fdc["rules_grams"].notna()
-    llm_rescued = needs_with_fdc["portion_resolved_by_llm"].fillna(False)
+    usda_avail = (
+        needs_with_fdc["usda_portion_available"].fillna(False).astype(bool)
+        if "usda_portion_available" in needs_with_fdc.columns
+        else pd.Series(False, index=needs_with_fdc.index)
+    )
+    rules_ok = (
+        needs_with_fdc["rules_grams"].notna()
+        if "rules_grams" in needs_with_fdc.columns
+        else pd.Series(False, index=needs_with_fdc.index)
+    )
+    llm_rescued = (
+        needs_with_fdc["portion_resolved_by_llm"].fillna(False).astype(bool)
+        if "portion_resolved_by_llm" in needs_with_fdc.columns
+        else pd.Series(False, index=needs_with_fdc.index)
+    )
 
     report: dict[str, Any] = {
         **amount_summary,
@@ -798,12 +820,15 @@ def build_feasibility_report(
             if kind in ("volume", "count"):
                 sub_fdc = sub[sub["llm_fdc_id"].notna()]
                 if len(sub_fdc):
-                    report[f"rules_gram_rate_{kind}_given_fdc"] = _rate(
-                        sub_fdc["rules_grams"].notna(), len(sub_fdc)
-                    )
-                    report[f"usda_portion_available_rate_{kind}"] = _rate(
-                        sub_fdc["usda_portion_available"].fillna(False), len(sub_fdc)
-                    )
+                    if "rules_grams" in sub_fdc.columns:
+                        report[f"rules_gram_rate_{kind}_given_fdc"] = _rate(
+                            sub_fdc["rules_grams"].notna(), len(sub_fdc)
+                        )
+                    if "usda_portion_available" in sub_fdc.columns:
+                        report[f"usda_portion_available_rate_{kind}"] = _rate(
+                            sub_fdc["usda_portion_available"].fillna(False).astype(bool),
+                            len(sub_fdc),
+                        )
 
     return report
 
@@ -930,7 +955,7 @@ def _finish_feasibility_run(
 
 def _load_payloads(paths: dict[str, Path], manifest: dict[str, Any], force: bool) -> list[dict] | None:
     saved = load_manifest(paths["payloads"].parent)
-    if force or not paths["payloads"].is_file() or not manifest_matches(saved, manifest):
+    if force or not paths["payloads"].is_file() or not manifest_compatible_for_cache(saved, manifest):
         return None
     print(f"Loaded cached payloads ({paths['payloads'].stat().st_size // 1024} KB)", flush=True)
     with paths["payloads"].open("rb") as f:
@@ -1060,6 +1085,7 @@ def run_judging_cached(
     baseline_paths: dict[str, Path] | None = None,
     retry_limit: int | None = None,
     total_dataset_lines: int | None = None,
+    expected_lines_per_recipe: dict[int, int] | None = None,
     disk_flush_every: int = 100,
     judge_log_every: int = 25,
     heartbeat_sec: float = 15.0,
@@ -1096,28 +1122,37 @@ def run_judging_cached(
             f"(baseline preserved: {len(base_df)} rows)",
             flush=True,
         )
-    elif not force and not cache_path.is_file() and paths["matches"].is_file() and manifest_matches(saved, manifest):
+    elif not force and not cache_path.is_file() and paths["matches"].is_file() and manifest_compatible_for_cache(saved, manifest):
         cache_path = paths["matches"]
-    elif not force and cache_path.is_file() and manifest_matches(saved, manifest) and retry_mode is None:
-        if not is_openai_partial_manifest(saved):
-            df = pd.read_parquet(cache_path)
-            if cache_path == paths["matches"] and not paths["judge_raw"].is_file():
-                judge_cols = [c for c in df.columns if c not in (
-                    "rules_grams", "rules_grams_status", "rules_grams_method",
-                    "usda_portion_available", "portion_resolved_by_llm",
-                )]
-                df[judge_cols].to_parquet(paths["judge_raw"], index=False)
-                print("Migrated judge cache → judge_matches_raw.parquet", flush=True)
-            n_ok = df["llm_fdc_id"].notna().sum() if "llm_fdc_id" in df.columns else 0
-            print(f"Loaded cached judge results ({len(df)} rows, {n_ok} fdc matches)", flush=True)
-            return df
-        pending = len(payloads)
-        if cache_path.is_file():
-            skip = completed_keys(load_judge_checkpoint(cache_path))
+    elif not force and cache_path.is_file() and manifest_compatible_for_cache(saved, manifest) and retry_mode is None:
+        cached_df = load_judge_checkpoint(cache_path)
+        if cache_path == paths["matches"] and not paths["judge_raw"].is_file():
+            judge_cols = [c for c in cached_df.columns if c not in (
+                "rules_grams", "rules_grams_status", "rules_grams_method",
+                "usda_portion_available", "portion_resolved_by_llm",
+            )]
+            cached_df[judge_cols].to_parquet(paths["judge_raw"], index=False)
+            cache_path = paths["judge_raw"]
+            cached_df = load_judge_checkpoint(cache_path)
+            print("Migrated judge cache → judge_matches_raw.parquet", flush=True)
+        n_expected = len(payloads)
+        n_cached = len(cached_df)
+        if not is_openai_partial_manifest(saved) and n_cached >= n_expected and n_expected > 0:
+            n_ok = cached_df["llm_fdc_id"].notna().sum() if "llm_fdc_id" in cached_df.columns else 0
+            print(f"Loaded cached judge results ({n_cached} rows, {n_ok} fdc matches)", flush=True)
+            return cached_df
+        if n_cached > 0 and n_cached < n_expected:
+            skip = completed_keys(cached_df)
             payloads = _filter_payloads(payloads, skip_keys=skip)
+            base_df = cached_df
+            reason = (
+                "OpenAI key exhaustion"
+                if is_openai_partial_manifest(saved)
+                else "interrupted run"
+            )
             print(
-                f"Resuming judge after OpenAI key exhaustion: "
-                f"{len(skip)} done, {len(payloads)} pending (of {pending} total payloads)",
+                f"Resuming judge after {reason}: "
+                f"{len(skip)} done, {len(payloads)} pending (of {n_expected} total payloads)",
                 flush=True,
             )
 
@@ -1187,6 +1222,8 @@ def run_judging_cached(
             log_every=judge_log_every,
             heartbeat_sec=heartbeat_sec,
             total_dataset_lines=total_dataset_lines or manifest.get("n_lines"),
+            expected_lines_per_recipe=expected_lines_per_recipe,
+            baseline_judge_df=base_df if retry_mode is not None and not base_df.empty else None,
             progress_writer=progress_writer,
             verbose=not quiet,
             dequant_cache_runtime=dequant_cache_runtime,
@@ -1209,20 +1246,26 @@ def run_judging_cached(
 
     keys_exhausted = bool(breaker and breaker.get("reason") == "openai_keys_exhausted")
 
+    from judge_checkpoint import combine_judged_checkpoint
+
     if progress_writer is not None:
         new_df = pd.DataFrame(all_exp)
-        if retry_mode is not None and not base_df.empty:
-            df = pd.concat([base_df, new_df], ignore_index=True)
-        elif new_df.empty:
-            df = load_judge_checkpoint(cache_path)
-        else:
+        df = combine_judged_checkpoint(
+            cache_path,
+            all_exp,
+            baseline_df=base_df if retry_mode is not None and not base_df.empty else None,
+        )
+        if df.empty and not new_df.empty:
             df = new_df
         df.to_parquet(cache_path, index=False)
     else:
         new_df = pd.DataFrame(all_exp)
-        if retry_mode is not None and not base_df.empty:
-            df = pd.concat([base_df, new_df], ignore_index=True)
-        else:
+        df = combine_judged_checkpoint(
+            cache_path,
+            all_exp,
+            baseline_df=base_df if retry_mode is not None and not base_df.empty else None,
+        )
+        if df.empty and not new_df.empty:
             df = new_df
         df.to_parquet(cache_path, index=False)
     if retry_mode is not None:
@@ -1290,6 +1333,7 @@ def run_feasibility(
     recipe_cache_dir: Path | None = None,
     dequant_cache_path: Path | None = None,
     no_dequant_cache: bool = False,
+    skip_resolved_in_db: bool = False,
 ) -> dict[str, Any]:
     load_dotenv()
     retry_mode = partial_retry_mode(
@@ -1378,6 +1422,7 @@ def run_feasibility(
             t0=t0,
             dequant_cache_path=dequant_cache_path,
             no_dequant_cache=no_dequant_cache,
+            skip_resolved_in_db=skip_resolved_in_db,
         )
 
 
@@ -1416,6 +1461,7 @@ def _run_feasibility_pipeline(
     t0: float,
     dequant_cache_path: Path | None = None,
     no_dequant_cache: bool = False,
+    skip_resolved_in_db: bool = False,
 ) -> dict[str, Any]:
     from sample_recipes import DEFAULT_RECIPE_CSV, load_sampled_recipes
 
@@ -1425,6 +1471,25 @@ def _run_feasibility_pipeline(
         sample_manifest=sample_manifest,
         recipe_csv=recipe_csv or DEFAULT_RECIPE_CSV,
     )
+    skipped_resolved_ids: set[int] = set()
+    if skip_resolved_in_db:
+        from load_resolved_recipes import exclude_recipes_already_resolved
+
+        recipes, recipe_ingredients, sampled_ids, skipped_resolved_ids = (
+            exclude_recipes_already_resolved(recipes, recipe_ingredients, sampled_ids)
+        )
+        if skipped_resolved_ids:
+            preview = sorted(skipped_resolved_ids)[:10]
+            suffix = "..." if len(skipped_resolved_ids) > 10 else ""
+            print(
+                f"Skipping {len(skipped_resolved_ids)} recipe(s) already in "
+                f"recipe.resolved_recipes: {preview}{suffix}",
+                flush=True,
+            )
+        if not sampled_ids:
+            raise SystemExit(
+                "All requested recipes already exist in recipe.resolved_recipes; nothing to do."
+            )
     if limit is not None:
         recipe_ingredients = recipe_ingredients.head(limit)
 
@@ -1434,13 +1499,27 @@ def _run_feasibility_pipeline(
         pick = sorted(rng.sample(range(len(recipe_ingredients)), n_sample))
         recipe_ingredients = recipe_ingredients.iloc[pick].reset_index(drop=True)
 
+    effective_n_recipes = len(sampled_ids) if sample_manifest is not None else n_recipes
     manifest = build_manifest(
-        n_recipes=n_recipes,
+        n_recipes=effective_n_recipes,
         seed=seed,
         model=model,
         limit=limit,
         n_lines=len(recipe_ingredients),
     )
+    if sample_manifest is not None:
+        import hashlib
+
+        manifest["sample_manifest"] = str(sample_manifest.resolve())
+        manifest["sampled_recipe_ids"] = [int(x) for x in sampled_ids]
+        ids_blob = json.dumps(
+            sorted(int(x) for x in sampled_ids),
+            separators=(",", ":"),
+        ).encode()
+        manifest["sampled_recipe_ids_sha256"] = hashlib.sha256(ids_blob).hexdigest()
+    if skipped_resolved_ids:
+        manifest["skipped_resolved_recipe_ids"] = sorted(int(x) for x in skipped_resolved_ids)
+        manifest["skip_resolved_in_db"] = True
     if sample_lines is not None:
         manifest["sample_lines"] = int(sample_lines)
         manifest["sample_seed"] = int(sample_seed)
@@ -1622,6 +1701,9 @@ def _run_feasibility_pipeline(
 
         if progress_writer is not None:
             progress_writer.set_phase("judging", total=len(payloads))
+        expected_lines_per_recipe = (
+            recipe_ingredients.groupby("recipe_id").size().astype(int).to_dict()
+        )
         matches_df = run_judging_cached(
             payloads,
             model=model,
@@ -1633,6 +1715,7 @@ def _run_feasibility_pipeline(
             baseline_paths=baseline_paths if retry_mode is not None else None,
             retry_limit=retry_limit,
             total_dataset_lines=len(recipe_ingredients),
+            expected_lines_per_recipe=expected_lines_per_recipe,
             disk_flush_every=disk_flush_every,
             judge_log_every=judge_log_every,
             heartbeat_sec=heartbeat_sec,
@@ -1827,6 +1910,18 @@ def main() -> None:
             "all LLM calls (judge, portion pick, line enrichment) are limited to those keys"
         ),
     )
+    parser.add_argument(
+        "--sample-manifest",
+        type=Path,
+        default=None,
+        help="JSON manifest with recipe_ids (e.g. cuisine_nlg_cap40_manifest.json)",
+    )
+    parser.add_argument(
+        "--recipe-csv",
+        type=Path,
+        default=None,
+        help="RecipeNLG CSV path (default: Data/recipes/RecipeNLG.csv)",
+    )
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--skip-portion-llm", action="store_true")
     parser.add_argument("--finalize-only", action="store_true", help="Rebuild report from cached parquets")
@@ -1864,6 +1959,14 @@ def main() -> None:
         "--no-dequant-cache",
         action="store_true",
         help="Disable dequant_norm cache even if a default file exists",
+    )
+    parser.add_argument(
+        "--skip-resolved-in-db",
+        action="store_true",
+        help=(
+            "Skip recipe_ids that already have rows in recipe.resolved_recipes "
+            "(checked before pipeline phases run)"
+        ),
     )
     parser.add_argument("--no-mlflow", action="store_true", help="Skip MLflow logging")
     parser.add_argument(
@@ -1903,10 +2006,13 @@ def main() -> None:
         retry_limit=args.retry_limit,
         use_mlflow=not args.no_mlflow,
         mlflow_experiment=args.mlflow_experiment,
+        sample_manifest=args.sample_manifest,
+        recipe_csv=args.recipe_csv,
         sample_lines=args.sample_lines,
         sample_seed=args.sample_seed,
         dequant_cache_path=args.dequant_cache,
         no_dequant_cache=args.no_dequant_cache,
+        skip_resolved_in_db=args.skip_resolved_in_db,
     )
 
 
