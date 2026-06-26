@@ -372,8 +372,45 @@ Your partner should open these with Jupyter kernel cwd = `Capstone/` or `scratch
 | **[scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb](scratch/EDA/portion_feasibility_v4_recipe_eda.ipynb)** | **Recipe-level EDA:** 106 fully resolved recipes, all-but-one counts, domain breakdown |
 | [scratch/EDA/count_portion_eda.ipynb](scratch/EDA/count_portion_eda.ipynb) | Deep dive on count-portion matching |
 | [scratch/EDA/usda_portion_and_recipe_feasibility.ipynb](scratch/EDA/usda_portion_and_recipe_feasibility.ipynb) | Earlier USDA portion feasibility exploration |
+| **[scratch/EDA/dietary_tagging_eda.ipynb](scratch/EDA/dietary_tagging_eda.ipynb)** | Nutrient coverage + distribution for dietary tagging (diabetes, osteoporosis, allergens) |
 
 v4 run artifacts (local, not in git): `scratch/EDA/portion_feasibility_1000_v4_no_portion/` — `pipeline_matches.parquet`, `feasibility_report.json`, `judge_matches_raw.parquet`.
+
+### Dietary tagging
+
+Precise ingredient/recipe tags for diabetes, osteoporosis, and dietary restrictions.
+
+| Resource | Purpose |
+|----------|---------|
+| [docs/dietary_tagging_framework.md](docs/dietary_tagging_framework.md) | Three-layer model (absolute, corpus-relative, user-relative) |
+| [docs/dietary_tagging_eda_report.md](docs/dietary_tagging_eda_report.md) | EDA findings template for GitHub issue |
+| `sql/14_create_tag_schema.sql` | `tag` schema DDL |
+| `scripts/tag_nutrients.py` | Load nutrient tags from `food_nutrient` |
+| `scripts/tag_restrictions.py` | Allergen/restriction tags from `data/allergen_taxonomy.json` |
+| `data/diet_tags.json` | Unified diet tag registry (restrictions, goals, cultural rules) |
+| `scripts/tag_ingredients.py` | Ingredient tags from USDA CSV + FoodOn (local) |
+| `scripts/tag_recipes_local.py` | Recipe rollup from resolved lines + ingredient tags |
+| `scripts/tag_mvp_recipes.py` | Tag MVP corpus recipes; writes `scratch/tag/recipe_diet_tags_wide` |
+| `scripts/diet_tags_corpus.py` | Build `recipe_diet_tags` for MVP corpus cache |
+| `scripts/check_tagging_env.py` | Environment sanity check |
+
+```bash
+# Local FoodOn index (one-time, reads Data/foodon-master/foodon.owl)
+uv run python scripts/build_foodon_index_cache.py
+
+# Ingredient diet tags (restrictions + nutrition goals)
+uv run python scripts/tag_ingredients.py --limit 10000
+
+# Recipe rollup (needs resolved recipe parquet/csv)
+uv run python scripts/tag_recipes_local.py --resolved path/to/lines.parquet
+
+# MVP demo corpus (auto-wired into ranker via mvp_corpus_cache)
+uv run python scripts/tag_mvp_recipes.py
+uv run python scripts/warm_mvp_cache.py --refresh
+
+# Legacy restriction-only pass
+uv run python scripts/tag_restrictions_local.py --foodon
+```
 
 ### Design docs
 

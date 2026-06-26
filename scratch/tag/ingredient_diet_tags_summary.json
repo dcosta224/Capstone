@@ -1,0 +1,30 @@
+{
+  "foods_scanned": 300,
+  "long_rows": 10523,
+  "tag_true_counts": {
+    "dairy_free": 213,
+    "egg_free": 257,
+    "nut_free": 284,
+    "peanut_free": 296,
+    "soy_free": 191,
+    "shellfish_free": 299,
+    "fish_free": 296,
+    "gluten_free": 163,
+    "sesame_free": 285,
+    "no_red_meat": 271,
+    "no_pork": 246,
+    "vegan": 112,
+    "plant_based": 115,
+    "halal_compatible": 242,
+    "jain_compatible": 116,
+    "low_carb": 104,
+    "low_fat": 119,
+    "low_cholesterol": 175,
+    "high_protein": 71,
+    "calorie_conscious": 93,
+    "low_sodium": 86,
+    "heart_healthy_ingredient": 23,
+    "diabetic_friendly_ingredient": 34,
+    "anti_inflammatory_ingredient": 35
+  }
+}

@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from db import connect
+from diet_tags_corpus import build_recipe_diet_tags_for_corpus
 from mvp_data import (
     fetch_food_nutrients_for_recipe,
     fetch_mvp_recipe_ids,
@@ -176,6 +177,11 @@ def _build_corpus_from_db() -> dict[str, Any]:
     finally:
         conn.close()
 
+    recipe_diet_tags, recipe_restrictions = build_recipe_diet_tags_for_corpus(
+        ingredients_by_recipe,
+        food_nutrients,
+    )
+
     aligned_embs: list[np.ndarray] = []
     aligned_ids: list[int] = []
     aligned_names: list[str] = []
@@ -199,6 +205,8 @@ def _build_corpus_from_db() -> dict[str, Any]:
         "features": features,
         "ingredients_by_recipe": ingredients_by_recipe,
         "food_nutrients": food_nutrients,
+        "recipe_diet_tags": recipe_diet_tags,
+        "recipe_restrictions": recipe_restrictions,
         "cached_at": time.time(),
         "emb_source": emb_source,
         "n_mvp_ids": len(recipe_ids),
@@ -233,6 +241,8 @@ def _disk_cache_complete(disk: dict[str, Any]) -> bool:
     if n_mvp <= 0:
         return n_recipes > 0
     if disk.get("missing_embedding_ids"):
+        return False
+    if "recipe_diet_tags" not in disk:
         return False
     return n_recipes >= n_mvp
 

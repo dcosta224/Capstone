@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from mvp_dietary_fit import DietaryProfile, dietary_fit_for_recipe, merge_dietary_score
 from mvp_nutrient_fit import (
     clamp_fraction_bounds,
     kcal_target_midpoint,
@@ -28,9 +29,12 @@ class RankedRecipe:
     semantic_score: float
     nutrient_fit: float
     nutrient_score: float
+    dietary_score: float
     combined_score: float
     rank: int
     pfc_in_range: bool
+    dietary_passes: bool
+    dietary_violations: list[str]
     kcal_target: float
     recipe_kcal: float
 
@@ -63,6 +67,9 @@ def rank_recipes(
     protein_frac_max: float,
     w_semantic: float = 0.5,
     w_nutrient: float = 0.5,
+    dietary_profile: DietaryProfile | None = None,
+    recipe_restrictions: dict[int, set[str]] | None = None,
+    recipe_diet_tags: dict[int, dict[str, bool | None]] | None = None,
 ) -> list[RankedRecipe]:
     f0, f1, c0, c1, p0, p1 = clamp_fraction_bounds(
         fat_frac_min,
@@ -116,11 +123,6 @@ def rank_recipes(
         )
 
     nutrient_fits_arr = np.array(nutrient_fits, dtype=float)
-    w_sum = w_semantic + w_nutrient
-    if w_sum <= 0:
-        w_semantic, w_nutrient, w_sum = 0.5, 0.5, 1.0
-    w_semantic /= w_sum
-    w_nutrient /= w_sum
 
     semantic_scores = np.clip(sims, 0.0, 1.0)
     nutrient_scores = np.array(
@@ -134,7 +136,44 @@ def rank_recipes(
         ],
         dtype=float,
     )
-    combined = 100.0 * (w_semantic * semantic_scores + w_nutrient * nutrient_scores)
+
+    dietary_scores: list[float] = []
+    dietary_passes: list[bool] = []
+    dietary_violations: list[list[str]] = []
+    for i, row in enumerate(nutrient_rows):
+        rid = int(recipe_ids[i])
+        if dietary_profile is not None:
+            restr = (recipe_restrictions or {}).get(rid, set())
+            tags = (recipe_diet_tags or {}).get(rid, {})
+            d_score, d_pass, d_viol = dietary_fit_for_recipe(
+                row,
+                dietary_profile,
+                recipe_restrictions=restr,
+                recipe_tags=tags,
+            )
+        else:
+            d_score, d_pass, d_viol = 1.0, True, []
+        dietary_scores.append(d_score)
+        dietary_passes.append(d_pass)
+        dietary_violations.append(d_viol)
+
+    dietary_scores_arr = np.array(dietary_scores, dtype=float)
+    w_dietary = dietary_profile.w_dietary if dietary_profile is not None else 0.0
+
+    combined = np.array(
+        [
+            merge_dietary_score(
+                float(semantic_scores[i]),
+                float(nutrient_scores[i]),
+                float(dietary_scores_arr[i]),
+                w_semantic=w_semantic,
+                w_nutrient=w_nutrient,
+                w_dietary=w_dietary,
+            )
+            for i in range(len(recipe_ids))
+        ],
+        dtype=float,
+    )
 
     order = np.argsort(-combined)
     results: list[RankedRecipe] = []
@@ -148,9 +187,12 @@ def rank_recipes(
                 semantic_score=float(semantic_scores[i]),
                 nutrient_fit=float(nutrient_fits_arr[i]),
                 nutrient_score=float(nutrient_scores[i]),
+                dietary_score=float(dietary_scores_arr[i]),
                 combined_score=float(combined[i]),
                 rank=rank_idx + 1,
                 pfc_in_range=bool(pfc_flags[i]),
+                dietary_passes=bool(dietary_passes[i]),
+                dietary_violations=list(dietary_violations[i]),
                 kcal_target=kcal_target,
                 recipe_kcal=float(recipe_kcals[i]),
             )

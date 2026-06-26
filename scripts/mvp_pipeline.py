@@ -10,6 +10,7 @@ import numpy as np
 
 from db import connect
 from mvp_corpus_cache import get_cached_food_nutrients, get_cached_ingredients, get_mvp_corpus
+from mvp_dietary_fit import DietaryProfile
 from mvp_data import build_recipe_macro_inputs, parse_nlg_ingredients
 from mvp_log import finish_run, log_stage, start_run
 from mvp_recipe_judge import FinalPickCandidate, select_final_candidate
@@ -56,6 +57,9 @@ class UserQuery:
     w_semantic: float = 0.5
     w_nutrient: float = 0.5
     top_k: int = 10
+    dietary_profile: DietaryProfile | None = None
+    recipe_restrictions: dict[int, set[str]] | None = None
+    recipe_diet_tags: dict[int, dict[str, bool | None]] | None = None
 
 
 @dataclass
@@ -90,9 +94,12 @@ def _ranked_to_dict(r) -> dict[str, Any]:
         "semantic_score": r.semantic_score,
         "nutrient_fit": r.nutrient_fit,
         "nutrient_score": r.nutrient_score,
+        "dietary_score": r.dietary_score,
         "combined_score": r.combined_score,
         "rank": r.rank,
         "pfc_in_range": r.pfc_in_range,
+        "dietary_passes": r.dietary_passes,
+        "dietary_violations": r.dietary_violations,
         "kcal_target": r.kcal_target,
         "recipe_kcal": r.recipe_kcal,
     }
@@ -213,6 +220,13 @@ def run_pipeline(
             {"message": "Ranking recipes by semantic + PFC fit…", "status": "running", "kcal_target": kcal_target},
             on_event,
         )
+        recipe_diet_tags = query.recipe_diet_tags
+        if recipe_diet_tags is None:
+            recipe_diet_tags = corpus.get("recipe_diet_tags")
+        recipe_restrictions = query.recipe_restrictions
+        if recipe_restrictions is None:
+            recipe_restrictions = corpus.get("recipe_restrictions")
+
         ranked = rank_recipes(
             corpus["recipe_ids"],
             corpus["recipe_names"],
@@ -229,6 +243,9 @@ def run_pipeline(
             protein_frac_max=query.protein_frac_max,
             w_semantic=query.w_semantic,
             w_nutrient=query.w_nutrient,
+            dietary_profile=query.dietary_profile,
+            recipe_restrictions=recipe_restrictions,
+            recipe_diet_tags=recipe_diet_tags,
         )
         _emit(
             events,
