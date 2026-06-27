@@ -717,6 +717,88 @@ def apply_portion_llm_pass(
     return out
 
 
+def _match_row_field(row: Any, name: str) -> Any:
+    value = getattr(row, name, None)
+    if value is not None and isinstance(value, float) and pd.isna(value):
+        return None
+    return value
+
+
+def _gram_resolution_succeeded(grams: Any, status: Any) -> bool:
+    """True when gram resolution produced a usable grams value."""
+    if grams is None or (isinstance(grams, float) and pd.isna(grams)):
+        return False
+    if status is None or (isinstance(status, float) and pd.isna(status)):
+        return False
+    status_str = str(status)
+    if status_str.startswith("ok_"):
+        return True
+    return status_str in ("negligible_calories", "compound_skipped")
+
+
+def _parsed_for_rules_grams(row: Any, parsed: dict[str, Any], *, amount_kind: str) -> dict[str, Any]:
+    """Merge sparse parsed_lookup rows with judge match qty/unit fields."""
+    out: dict[str, Any] = {**parsed, "amount_kind": amount_kind, "amount_kind_final": amount_kind}
+    if missing_quantity(out.get("quantity")):
+        row_qty = _match_row_field(row, "quantity")
+        if not missing_quantity(row_qty):
+            out["quantity"] = float(row_qty)
+    unit = out.get("unit")
+    if unit is None or (isinstance(unit, float) and pd.isna(unit)) or str(unit).strip() == "":
+        row_unit = _match_row_field(row, "unit")
+        if row_unit is not None and not (isinstance(row_unit, float) and pd.isna(row_unit)):
+            out["unit"] = row_unit
+    if not out.get("ingredient"):
+        out["ingredient"] = _match_row_field(row, "ingredient")
+    if not out.get("name"):
+        out["name"] = _match_row_field(row, "name")
+
+    plan = out.get("resolution_plan")
+    if isinstance(plan, dict):
+        plan_out = dict(plan)
+        if missing_quantity(plan_out.get("quantity")) and not missing_quantity(out.get("quantity")):
+            plan_out["quantity"] = float(out["quantity"])
+        plan_unit = plan_out.get("unit")
+        if (
+            plan_unit is None
+            or (isinstance(plan_unit, float) and pd.isna(plan_unit))
+            or str(plan_unit).strip() == ""
+        ) and out.get("unit"):
+            plan_out["unit"] = out["unit"]
+        out["resolution_plan"] = plan_out
+    return out
+
+
+def _apply_rules_gram_columns(
+    matches_df: pd.DataFrame,
+    *,
+    mask: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Copy rules_grams into final grams columns without clobbering good judge-time grams."""
+    out = matches_df.copy()
+    if mask is None:
+        apply_mask = pd.Series(True, index=out.index)
+    else:
+        apply_mask = mask.reindex(out.index, fill_value=False)
+
+    rules_ok = out.apply(
+        lambda r: _gram_resolution_succeeded(r["rules_grams"], r["rules_grams_status"]),
+        axis=1,
+    )
+    judge_ok = out.apply(
+        lambda r: _gram_resolution_succeeded(r["grams"], r["grams_status"]),
+        axis=1,
+    )
+
+    replace_with_rules = apply_mask & (rules_ok | ~judge_ok)
+    if not replace_with_rules.any():
+        return out
+    out.loc[replace_with_rules, "grams"] = out.loc[replace_with_rules, "rules_grams"].astype(object)
+    out.loc[replace_with_rules, "grams_status"] = out.loc[replace_with_rules, "rules_grams_status"]
+    out.loc[replace_with_rules, "grams_method"] = out.loc[replace_with_rules, "rules_grams_method"]
+    return out
+
+
 def enrich_matches_with_rules_grams(
     matches_df: pd.DataFrame,
     parsed_lookup: dict[tuple[int, int], dict[str, Any]],
@@ -769,7 +851,7 @@ def enrich_matches_with_rules_grams(
             or getattr(row, "amount_kind", None)
             or parsed.get("amount_kind_final", "")
         )
-        parsed_for_resolve = {**parsed, "amount_kind": amount_kind, "amount_kind_final": amount_kind}
+        parsed_for_resolve = _parsed_for_rules_grams(row, parsed, amount_kind=amount_kind)
 
         matched_pid = getattr(row, "matched_portion_id", None)
         if pd.isna(matched_pid):
@@ -809,6 +891,28 @@ def enrich_matches_with_rules_grams(
     out["portion_llm_rationale"] = portion_llm_rat
     out["portion_resolved_by_llm"] = portion_resolved_by_llm
     return out
+
+
+def _build_parsed_lookup(
+    parsed: pd.DataFrame,
+    amount_df: pd.DataFrame,
+) -> dict[tuple[int, int], dict[str, Any]]:
+    """Map (recipe_id, ingredient_idx) -> parsed row for gram resolution and portion LLM.
+
+    When --skip-resolved-in-db shrinks recipe_ingredients, parsed only covers new lines but
+    judging still runs over the full cached payload set; fill missing keys from amount_df.
+    """
+    lookup: dict[tuple[int, int], dict[str, Any]] = {
+        (int(r["recipe_id"]), int(r["ingredient_idx"])): r
+        for r in parsed.to_dict(orient="records")
+    }
+    for r in amount_df.to_dict(orient="records"):
+        key = (int(r["recipe_id"]), int(r["ingredient_idx"]))
+        if key not in lookup:
+            lookup[key] = r
+        else:
+            lookup[key] = {**r, **lookup[key]}
+    return lookup
 
 
 def attach_amount_fields(matches_df: pd.DataFrame, amount_df: pd.DataFrame) -> pd.DataFrame:
@@ -1160,28 +1264,43 @@ def _no_portion_keys(paths: dict[str, Path]) -> set[tuple[int, int]]:
     return _partial_retry_keys(paths, retry_mode="no_portion")
 
 
+def _payload_parent_key(p: dict) -> tuple[int, int]:
+    return (int(p["recipe_id"]), int(p["ingredient_idx"]))
+
+
+def _payload_line_key(p: dict) -> tuple[int, int, int]:
+    return (
+        int(p["recipe_id"]),
+        int(p["ingredient_idx"]),
+        int(p.get("split_part_idx") or 0),
+    )
+
+
 def _filter_payloads(
     payloads: list[dict],
     *,
     keys: set[tuple[int, int]] | None = None,
-    skip_keys: set[tuple[int, int]] | None = None,
+    skip_keys: set[tuple[int, int, int]] | None = None,
 ) -> list[dict]:
     out: list[dict] = []
     for p in payloads:
-        key = (int(p["recipe_id"]), int(p["ingredient_idx"]))
-        if keys is not None and key not in keys:
+        parent = _payload_parent_key(p)
+        line = _payload_line_key(p)
+        if keys is not None and parent not in keys:
             continue
-        if skip_keys and key in skip_keys:
+        if skip_keys and line in skip_keys:
             continue
         out.append(p)
     return out
 
 
-def _v4_completed_keys(df: pd.DataFrame) -> set[tuple[int, int]]:
+def _v4_completed_keys(df: pd.DataFrame) -> set[tuple[int, int, int]]:
     if df.empty or "prompt_version" not in df.columns:
         return set()
     sub = df[df["prompt_version"] == PROMPT_VERSION]
-    return {(int(r.recipe_id), int(r.ingredient_idx)) for r in sub.itertuples(index=False)}
+    from judge_checkpoint import completed_keys
+
+    return completed_keys(sub)
 
 
 def run_judging_cached(
@@ -1218,7 +1337,11 @@ def run_judging_cached(
         payloads = _filter_payloads(payloads, keys=retry_keys)
         write_ckpt = load_judge_checkpoint(cache_path)
         if not force and not write_ckpt.empty:
-            skip = _v4_completed_keys(write_ckpt) & retry_keys
+            skip = {
+                key
+                for key in _v4_completed_keys(write_ckpt)
+                if (key[0], key[1]) in retry_keys
+            }
             payloads = _filter_payloads(payloads, skip_keys=skip)
         base_df = _load_baseline_judge_df(baseline_paths)
         if not base_df.empty and retry_keys:
@@ -1761,10 +1884,7 @@ def _run_feasibility_pipeline(
                 for r in parsed.itertuples(index=False)
             ]
 
-    parsed_lookup = {
-        (int(r["recipe_id"]), int(r["ingredient_idx"])): r
-        for r in parsed.to_dict(orient="records")
-    }
+    parsed_lookup = _build_parsed_lookup(parsed, amount_df)
 
     match_config = StagedMatchConfig()
     retr_config = LLMRetrievalConfig()
@@ -1921,17 +2041,9 @@ def _run_feasibility_pipeline(
                     in llm_scope_keys,
                     axis=1,
                 )
-                matches_df.loc[retry_mask, "grams"] = matches_df.loc[retry_mask, "rules_grams"]
-                matches_df.loc[retry_mask, "grams_status"] = matches_df.loc[
-                    retry_mask, "rules_grams_status"
-                ]
-                matches_df.loc[retry_mask, "grams_method"] = matches_df.loc[
-                    retry_mask, "rules_grams_method"
-                ]
+                matches_df = _apply_rules_gram_columns(matches_df, mask=retry_mask)
             else:
-                matches_df["grams"] = matches_df["rules_grams"]
-                matches_df["grams_status"] = matches_df["rules_grams_status"]
-                matches_df["grams_method"] = matches_df["rules_grams_method"]
+                matches_df = _apply_rules_gram_columns(matches_df)
 
         if not skip_portion_llm:
             already_done = (

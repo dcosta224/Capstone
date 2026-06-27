@@ -228,6 +228,19 @@ class CountPortionCandidate:
 
 
 @dataclass(frozen=True)
+class MassPortionCandidate:
+    portion_id: int
+    fdc_id: int
+    ref_amount: float
+    mass_unit: str
+    gram_weight: float
+    seq_num: int
+    data_points: int
+    modifier: str
+    portion_description: str
+
+
+@dataclass(frozen=True)
 class PortionCapabilitySets:
     volume_fdc_ids: frozenset[int]
     count_fdc_ids: frozenset[int]
@@ -529,6 +542,64 @@ def normalize_count_portion_row(row: dict[str, Any]) -> CountPortionCandidate | 
     )
 
 
+def _resolve_mass_unit_label_from_row(row: dict[str, Any]) -> str | None:
+    measure_unit_id = row.get("measure_unit_id")
+    if not _is_missing(measure_unit_id) and int(measure_unit_id) in MASS_MEASURE_UNIT_IDS:
+        return MASS_MEASURE_UNIT_IDS[int(measure_unit_id)]
+
+    _modifier, _portion_description, measure_unit_name = _portion_text_fields(row)
+    if measure_unit_name.lower() in MASS_MEASURE_UNIT_NAMES:
+        try:
+            return normalize_mass_unit(measure_unit_name.lower())
+        except UnitConversionError:
+            pass
+
+    for field in _portion_fields_to_search(row):
+        if not field or text_has_volume(field):
+            continue
+        match = MASS_TOKEN_RE.search(field)
+        if match:
+            try:
+                return normalize_mass_unit(match.group(1))
+            except UnitConversionError:
+                continue
+    return None
+
+
+def normalize_mass_portion_row(row: dict[str, Any]) -> MassPortionCandidate | None:
+    """Map a food_portion DB row to a mass PortionCandidate, or None."""
+    if normalize_portion_row(row) is not None or normalize_count_portion_row(row) is not None:
+        return None
+    if not _resolve_mass_from_row(row):
+        return None
+
+    mass_unit = _resolve_mass_unit_label_from_row(row)
+    if not mass_unit:
+        return None
+
+    gram_weight = float(row["gram_weight"])
+    if gram_weight <= 0:
+        return None
+
+    amount = row.get("amount")
+    ref_amount = float(amount) if amount not in (None, "") else 1.0
+    if ref_amount <= 0:
+        ref_amount = 1.0
+
+    modifier, portion_description, _measure_unit_name = _portion_text_fields(row)
+    return MassPortionCandidate(
+        portion_id=int(row["id"]),
+        fdc_id=int(row["fdc_id"]),
+        ref_amount=ref_amount,
+        mass_unit=mass_unit,
+        gram_weight=gram_weight,
+        seq_num=_optional_int(row.get("seq_num")),
+        data_points=_parse_data_points(row.get("data_points")),
+        modifier=modifier,
+        portion_description=portion_description,
+    )
+
+
 def build_count_portion_index(conn) -> dict[int, list[CountPortionCandidate]]:
     """Load count-usable food_portion rows keyed by fdc_id."""
     index: dict[int, list[CountPortionCandidate]] = {}
@@ -728,6 +799,84 @@ def pick_best_portion(
     return max(pool, key=lambda c: c.score_for(recipe_unit))
 
 
+def infer_matched_portion_id(
+    fdc_id: int,
+    *,
+    amount_kind: str,
+    unit: str | None = None,
+    quantity: float | None = None,
+    query_tokens: list[str] | None = None,
+    portion_index: dict[int, list[PortionCandidate]] | None = None,
+    count_portion_index: dict[int, list[CountPortionCandidate]] | None = None,
+) -> int | None:
+    """Pick best USDA portion for rules-based gram conversion."""
+    fdc_int = int(fdc_id)
+    if amount_kind == "volume" and unit and portion_index is not None:
+        candidates = portion_index.get(fdc_int, [])
+        portion = pick_best_portion(candidates, str(unit))
+        if portion is None:
+            return None
+        if quantity is not None:
+            result = _grams_from_volume_candidate(float(quantity), str(unit), portion)
+            if result is None or result.grams is None:
+                return None
+        return portion.portion_id
+    if amount_kind == "count" and count_portion_index is not None and query_tokens:
+        candidates = count_portion_index.get(fdc_int, [])
+        portion = pick_best_count_portion(candidates, list(query_tokens))
+        return portion.portion_id if portion is not None else None
+    return None
+
+
+def resolve_matched_portion_id(
+    fdc_id: int | None,
+    matched_portion_id: int | None,
+    *,
+    amount_kind: str,
+    unit: str | None = None,
+    quantity: float | None = None,
+    query_tokens: list[str] | None = None,
+    portion_index: dict[int, list[PortionCandidate]] | None = None,
+    count_portion_index: dict[int, list[CountPortionCandidate]] | None = None,
+) -> tuple[int | None, bool]:
+    """Validate judge portion pick; infer from indexes when missing or non-convertible."""
+    if fdc_id is None or amount_kind not in ("volume", "count"):
+        return matched_portion_id, False
+
+    inferred = infer_matched_portion_id(
+        int(fdc_id),
+        amount_kind=amount_kind,
+        unit=unit,
+        quantity=quantity,
+        query_tokens=query_tokens,
+        portion_index=portion_index,
+        count_portion_index=count_portion_index,
+    )
+
+    if matched_portion_id is None:
+        return inferred, inferred is not None
+
+    pid = int(matched_portion_id)
+    if amount_kind == "volume" and unit and portion_index is not None:
+        candidates = portion_index.get(int(fdc_id), [])
+        chosen = next((c for c in candidates if c.portion_id == pid), None)
+        if chosen is None:
+            return inferred, inferred is not None
+        qty = 1.0 if quantity is None else float(quantity)
+        result = _grams_from_volume_candidate(qty, str(unit), chosen)
+        if result is None or result.grams is None:
+            return inferred, inferred is not None
+        return pid, False
+
+    if amount_kind == "count" and count_portion_index is not None:
+        candidates = count_portion_index.get(int(fdc_id), [])
+        if not any(c.portion_id == pid for c in candidates):
+            return inferred, inferred is not None
+        return pid, False
+
+    return matched_portion_id, False
+
+
 def resolve_quantity_fields(line: str, *, method: str = "rules") -> dict[str, Any]:
     """Parse quantity and unit from an ingredient line."""
     if method != "rules":
@@ -847,6 +996,14 @@ def _resolve_water_sentinel_grams(
     q = float(quantity)
     unit_str = str(unit) if unit is not None else ""
 
+    if unit_str:
+        try:
+            inferred = unit_kind(unit_str)
+            if kind in ("volume", "mass") and inferred in ("volume", "mass"):
+                kind = inferred
+        except UnitConversionError:
+            pass
+
     if kind == "mass":
         mass_unit = normalize_unit(unit_str) or _normalize_parsed_unit(unit_str) or unit_str
         try:
@@ -873,7 +1030,26 @@ def _resolve_water_sentinel_grams(
                 unit_kind="volume",
                 method="missing volume unit",
             )
-        vol_unit = normalize_volume_unit(unit_str) or _normalize_parsed_unit(unit_str) or unit_str
+        vol_unit: str | None
+        try:
+            vol_unit = normalize_volume_unit(unit_str)
+        except UnitConversionError:
+            try:
+                mass_unit = normalize_mass_unit(unit_str)
+                grams = convert_mass(q, mass_unit, "gram")
+            except UnitConversionError:
+                return PortionGramResult(
+                    grams=None,
+                    status="bad_unit",
+                    unit_kind="volume",
+                    method=f"unsupported volume unit {unit_str!r}",
+                )
+            return PortionGramResult(
+                grams=round(grams, 4),
+                status="ok_water_sentinel",
+                unit_kind="mass",
+                method=f"water_sentinel:mass:{unit_str}→g (volume kind corrected)",
+            )
         try:
             ml = convert_volume(q, vol_unit, "milliliter")
         except UnitConversionError:

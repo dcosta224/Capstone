@@ -5,7 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=2.4.5",
+    "numpy>=2.0,<2.4",
     "openai>=1.40.0",
     "pandas>=2.2,<3",
     "psycopg2-binary>=2.9.12",
@@ -49,6 +49,23 @@ pipeline = [
     "tqdm>=4.67.0",
     "mlflow>=3",
     "networkx>=3.6.1",
+]
+
+ec2 = [
+    "ingredient-parser-nlp>=2.7.0",
+    "rapidfuzz>=3.14.5",
+    "faiss-cpu>=1.9.0",
+    "scikit-learn>=1.6.0",
+    "pyarrow>=19.0.0",
+    "tqdm>=4.67.0",
+    "networkx>=3.6.1",
+    "transformers>=4.51.0,<5",
+    "accelerate>=1.4.0",
+    "bitsandbytes>=0.45.0",
+    "lm-format-enforcer>=0.10.0",
+    "nest-asyncio>=1.6.0",
+    "psutil>=6.0.0",
+    "vllm>=0.8.0,<0.9",
 ]
 
 [[tool.uv.index]]

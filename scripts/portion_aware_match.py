@@ -580,9 +580,11 @@ def format_candidate_block_portion(
         pflag = getattr(row, "portion_flag", "-")
         portions = getattr(row, "portion_summary", "-") or "-"
         fit = getattr(row, "portion_match_score", 0.0) or 0.0
+        best_pid = getattr(row, "best_portion_id", None)
+        pid_note = f" | pick_portion_id={int(best_pid)}" if best_pid is not None else ""
         lines.append(
             f"{row.fdc_id} | {desc} | {row.lexical_dequant:.2f} | "
-            f"{row.dequant_sem:.2f} | {pflag} | portions: {portions} | fit={fit:.2f}"
+            f"{row.dequant_sem:.2f} | {pflag} | portions: {portions} | fit={fit:.2f}{pid_note}"
         )
     return "\n".join(lines)
 
@@ -616,10 +618,16 @@ def build_user_prompt_portion(
         parts.append(
             "NOTE: Recipe line includes explicit mass; grams will convert from mass directly."
         )
+    elif amount_kind == "volume":
+        parts.append(
+            "VOLUME NOTE: Recipe unit may differ from USDA portion unit (e.g. Tbsp recipe vs tsp "
+            "portion). Grams convert automatically via standard volume ratios. Set "
+            "matched_portion_id to pick_portion_id for your chosen fdc when fit>0."
+        )
     parts.extend(
         [
             "",
-            "CANDIDATES (fdc_id | description | L | S | P | portions | fit):",
+            "CANDIDATES (fdc_id | description | L | S | P | portions | fit | pick_portion_id):",
             format_candidate_block_portion(prompt_candidates, max_chars),
         ]
     )

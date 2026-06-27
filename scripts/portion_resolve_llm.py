@@ -32,6 +32,8 @@ SYSTEM_PROMPT = (
     "and a rules_class tag (volume/count/mass/other). Include mass rows with container modifiers "
     "(e.g. can/jar) when recipe unit is a container.\n"
     "Good-enough matching is OK: exact unit/size match preferred, but acceptable fallbacks:\n"
+    "- Volume: recipe unit may differ from portion unit (e.g. Tbsp recipe vs tsp portion); "
+    "grams convert automatically via standard volume ratios.\n"
     "- Recipe names size (small/medium/large) -> pick that modifier.\n"
     "- Generic count (3 eggs, 10 mushrooms) -> medium, then large, then small.\n"
     "- Container unit (can) -> modifier containing can even if rules_class=mass.\n"

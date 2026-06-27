@@ -23,7 +23,8 @@ SYSTEM_PROMPT = (
     "For dash/pinch units use explicit_volume (not count_portion).\n"
     "Set authoritative_mass_is_total=true when parenthetical mass is total weight, not per-piece.\n"
     "For compounds (parsley and chives), set is_compound=true and list components.\n"
-    "certainty 0.0-1.0; rationale one short sentence."
+    "Use empty arrays [] when count_size_tokens or count_unit_tokens do not apply.\n"
+    "certainty 0.0-1.0; rationale one short sentence (max 25 words)."
 )
 
 RESPONSE_SCHEMA = {

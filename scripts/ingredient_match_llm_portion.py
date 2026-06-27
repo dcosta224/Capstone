@@ -72,7 +72,9 @@ from portion_gram import (
     build_portion_capability_sets,
     build_portion_index,
     resolve_grams_from_parsed_row,
+    resolve_matched_portion_id,
 )
+from dequant_norm_splits import iter_split_part_rows, load_dequant_norm_splits
 from resolution_plan import plan_from_parsed_row
 from progress_utils import iter_progress
 from recipe_directions import parse_directions_list, relevant_direction_steps
@@ -85,13 +87,16 @@ PROMPT_VERSION = "v7_generic_defaults_prep_semantic_portion_capable"
 
 SYSTEM_PROMPT = (
     "Match recipe ingredient → USDA fdc_id.\n"
-    "Candidates: fdc_id | description | L | S | P | portions | fit "
-    "(P=V/C/Cm/VC/-; fit=unit match 0-1).\n"
+    "Candidates: fdc_id | description | L | S | P | portions | fit | pick_portion_id "
+    "(P=V/C/Cm/VC/-; fit=unit match 0-1; pick_portion_id=rules-recommended portion).\n"
     "Best identity first; else closest same-type substitute with usable portions "
     "(e.g. white wine vinegar→distilled vinegar). Never substitute different forms "
     "(e.g. garlic powder→garlic raw, dried→fresh). Abstain only if ≥20 kcal expected "
     "and no substitute.\n"
-    "Volume/count: prefer P!=- and fit>0; set matched_portion_id when fit>0. "
+    "Volume: recipe unit may differ from USDA portion unit (Tbsp vs tsp OK). Grams "
+    "auto-convert via volume density; set matched_portion_id to pick_portion_id when "
+    "fit>0. Cross-unit volume fit counts as fit>0.\n"
+    "Count: prefer P!=- and fit>0; set matched_portion_id when fit>0. "
     "Never pick P=- for volume/count unless negligible_calories.\n"
     "When SEMANTIC_FALLBACK is present and all primary candidates have fit=0, pick "
     "best identity from SEMANTIC_FALLBACK; set negligible_calories=true if this qty "
@@ -119,7 +124,10 @@ def precompute_payloads_portion(
     limit: int | None = None,
     chunk_size: int = 256,
     progress_writer: Any = None,
+    dequant_splits: dict | None = None,
 ) -> list[dict[str, Any]]:
+    if dequant_splits is None:
+        dequant_splits = load_dequant_norm_splits()
     n = len(parsed) if limit is None else min(limit, len(parsed))
     payloads: list[dict[str, Any]] = []
     volume_fdc_ids = set(capabilities.volume_fdc_ids)
@@ -188,136 +196,142 @@ def precompute_payloads_portion(
             recipe_id = int(row["recipe_id"])
             ingredient_idx = int(row["ingredient_idx"])
             ingredient = str(row["ingredient"])
-            name = str(row.get("name") or "")
-            preparation = str(row.get("preparation") or "")
-            unit = str(row.get("unit") or "")
 
-            plan = plan_from_parsed_row(row_dict)
-            amount_kind = (
-                row_dict.get("amount_kind_final")
-                or plan.primary_amount_kind
-                or classify_from_parsed_row(row_dict)
-            )
-            query = query_from_parsed_row(row, name_emb[i], prep_emb[i], dequant_emb[i])
-            staged = match_query(query, food_index)
-            staged_top1 = staged.get("matched_fdc_id")
+            for part_row, split_meta in iter_split_part_rows(row_dict, dequant_splits):
+                name = str(part_row.get("name") or "")
+                preparation = str(part_row.get("preparation") or "")
+                unit = str(part_row.get("unit") or "")
+                ingredient_for_prompt = (
+                    f"{ingredient} (split: {split_meta['split_part_text']})"
+                    if split_meta
+                    else ingredient
+                )
 
-            sims_i = sims_chunk[:, i - start] if sims_chunk.size else None
-            retr = retrieve_llm_candidates_portion_aware(
-                query,
-                food_index,
-                capabilities,
-                retr_config,
-                amount_kind=amount_kind,
-                staged_top1_fdc_id=staged_top1,
-                precomputed_sims=sims_i,
-                parsed_row=row_dict,
-                resolution_plan=plan,
-                portion_summary_index=portion_summary_index,
-            )
-            cand_df = retr.candidates
-            n_lexical_pool = int(cand_df.attrs.get("n_lexical_pool", 0)) if not cand_df.empty else 0
-            n_semantic_pool = int(cand_df.attrs.get("n_semantic_pool", 0)) if not cand_df.empty else 0
+                plan = plan_from_parsed_row(part_row)
+                amount_kind = (
+                    part_row.get("amount_kind_final")
+                    or plan.primary_amount_kind
+                    or classify_from_parsed_row(part_row)
+                )
+                query = query_from_parsed_row(row, name_emb[i], prep_emb[i], dequant_emb[i])
+                staged = match_query(query, food_index)
+                staged_top1 = staged.get("matched_fdc_id")
 
-            prompt_candidates = cand_df[cand_df["in_llm_prompt"]] if not cand_df.empty else cand_df
-            semantic_fb = retr.semantic_fallback
-            if semantic_fb is not None and not semantic_fb.empty:
-                prompt_for_judge = pd.concat(
-                    [prompt_candidates, semantic_fb], ignore_index=True
-                ).drop_duplicates(subset=["fdc_id"], keep="first")
-            else:
-                prompt_for_judge = prompt_candidates
+                sims_i = sims_chunk[:, i - start] if sims_chunk.size else None
+                retr = retrieve_llm_candidates_portion_aware(
+                    query,
+                    food_index,
+                    capabilities,
+                    retr_config,
+                    amount_kind=amount_kind,
+                    staged_top1_fdc_id=staged_top1,
+                    precomputed_sims=sims_i,
+                    parsed_row=part_row,
+                    resolution_plan=plan,
+                    portion_summary_index=portion_summary_index,
+                )
+                cand_df = retr.candidates
+                n_lexical_pool = int(cand_df.attrs.get("n_lexical_pool", 0)) if not cand_df.empty else 0
+                n_semantic_pool = int(cand_df.attrs.get("n_semantic_pool", 0)) if not cand_df.empty else 0
 
-            generic_match = lookup_generic_default(name)
-            hardcoded_judge = None
-            if generic_match is not None:
-                prompt_for_judge = inject_default_candidate(prompt_for_judge, generic_match)
-                hardcoded_judge = build_hardcoded_judge(generic_match)
+                prompt_candidates = cand_df[cand_df["in_llm_prompt"]] if not cand_df.empty else cand_df
+                semantic_fb = retr.semantic_fallback
+                if semantic_fb is not None and not semantic_fb.empty:
+                    prompt_for_judge = pd.concat(
+                        [prompt_candidates, semantic_fb], ignore_index=True
+                    ).drop_duplicates(subset=["fdc_id"], keep="first")
+                else:
+                    prompt_for_judge = prompt_candidates
 
-            n_retrieved_candidates = int(len(prompt_for_judge))
-            skip_sentinel = (
-                retr.portion_filter_kind in ("volume", "count") and not retr.mass_in_text
-            )
-            if not skip_sentinel:
-                prompt_for_judge = _append_sentinel_candidate(prompt_for_judge)
-                if generic_match is None or not generic_match.is_water_sentinel:
-                    prompt_for_judge = _append_water_sentinel_candidate(prompt_for_judge)
-            valid_fdc_ids = (
-                set(int(x) for x in prompt_for_judge["fdc_id"])
-                if not prompt_for_judge.empty
-                else set()
-            )
-            prompt_desc = (
-                {
-                    int(r.fdc_id): str(r.description)
-                    for r in prompt_for_judge.itertuples(index=False)
-                }
-                if not prompt_for_judge.empty
-                else {}
-            )
+                generic_match = lookup_generic_default(name)
+                hardcoded_judge = None
+                if generic_match is not None:
+                    prompt_for_judge = inject_default_candidate(prompt_for_judge, generic_match)
+                    hardcoded_judge = build_hardcoded_judge(generic_match)
 
-            steps = relevant_direction_steps(ingredient, directions_by_recipe.get(recipe_id, []))
-            user_prompt = build_user_prompt_portion(
-                ingredient,
-                name,
-                preparation,
-                unit,
-                amount_kind,
-                prompt_candidates,
-                steps,
-                retr_config.description_max_chars,
-                mass_in_text=retr.mass_in_text,
-                query_tokens=list(retr.query_tokens),
-                quantity=row.get("quantity"),
-                semantic_fallback=semantic_fb,
-            )
+                n_retrieved_candidates = int(len(prompt_for_judge))
+                skip_sentinel = (
+                    retr.portion_filter_kind in ("volume", "count") and not retr.mass_in_text
+                )
+                if not skip_sentinel:
+                    prompt_for_judge = _append_sentinel_candidate(prompt_for_judge)
+                    if generic_match is None or not generic_match.is_water_sentinel:
+                        prompt_for_judge = _append_water_sentinel_candidate(prompt_for_judge)
+                valid_fdc_ids = (
+                    set(int(x) for x in prompt_for_judge["fdc_id"])
+                    if not prompt_for_judge.empty
+                    else set()
+                )
+                prompt_desc = (
+                    {
+                        int(r.fdc_id): str(r.description)
+                        for r in prompt_for_judge.itertuples(index=False)
+                    }
+                    if not prompt_for_judge.empty
+                    else {}
+                )
 
-            top10 = cand_df.head(retr_config.top10_size) if not cand_df.empty else cand_df
-            top10_rows = [
-                {
-                    "rank": int(c.rank),
-                    "fdc_id": int(c.fdc_id),
-                    "data_type": c.data_type,
-                    "description": c.description,
-                    "lexical_dequant": float(c.lexical_dequant),
-                    "dequant_sem": float(c.dequant_sem),
-                    "retrieval_score": float(c.retrieval_score),
-                    "staged_final_score": float(c.staged_final_score),
-                    "staged_base_score": float(c.staged_base_score),
-                    "staged_prep_score": float(c.staged_prep_score),
-                    "in_llm_prompt": bool(c.in_llm_prompt),
-                    "is_staged_top1": bool(c.is_staged_top1),
-                    "portion_flag": getattr(c, "portion_flag", "-"),
-                    "has_volume_portion": bool(getattr(c, "has_volume_portion", False)),
-                    "has_count_portion": bool(getattr(c, "has_count_portion", False)),
-                    "portion_match_score": float(getattr(c, "portion_match_score", 0.0) or 0.0),
-                    "portion_summary": getattr(c, "portion_summary", "-"),
-                    "blended_score": float(getattr(c, "blended_score", c.retrieval_score)),
-                }
-                for c in top10.itertuples(index=False)
-            ] if not top10.empty else []
+                steps = relevant_direction_steps(ingredient, directions_by_recipe.get(recipe_id, []))
+                user_prompt = build_user_prompt_portion(
+                    ingredient_for_prompt,
+                    name,
+                    preparation,
+                    unit,
+                    amount_kind,
+                    prompt_candidates,
+                    steps,
+                    retr_config.description_max_chars,
+                    mass_in_text=retr.mass_in_text,
+                    query_tokens=list(retr.query_tokens),
+                    quantity=part_row.get("quantity"),
+                    semantic_fallback=semantic_fb,
+                )
 
-            staged_in_candidates = (
-                staged_top1 is not None
-                and not cand_df.empty
-                and bool((cand_df["fdc_id"] == staged_top1).any())
-            )
-            staged_in_top10 = (
-                staged_top1 is not None
-                and not top10.empty
-                and bool((top10["fdc_id"] == staged_top1).any())
-            )
+                top10 = cand_df.head(retr_config.top10_size) if not cand_df.empty else cand_df
+                top10_rows = [
+                    {
+                        "rank": int(c.rank),
+                        "fdc_id": int(c.fdc_id),
+                        "data_type": c.data_type,
+                        "description": c.description,
+                        "lexical_dequant": float(c.lexical_dequant),
+                        "dequant_sem": float(c.dequant_sem),
+                        "retrieval_score": float(c.retrieval_score),
+                        "staged_final_score": float(c.staged_final_score),
+                        "staged_base_score": float(c.staged_base_score),
+                        "staged_prep_score": float(c.staged_prep_score),
+                        "in_llm_prompt": bool(c.in_llm_prompt),
+                        "is_staged_top1": bool(c.is_staged_top1),
+                        "portion_flag": getattr(c, "portion_flag", "-"),
+                        "has_volume_portion": bool(getattr(c, "has_volume_portion", False)),
+                        "has_count_portion": bool(getattr(c, "has_count_portion", False)),
+                        "portion_match_score": float(getattr(c, "portion_match_score", 0.0) or 0.0),
+                        "portion_summary": getattr(c, "portion_summary", "-"),
+                        "blended_score": float(getattr(c, "blended_score", c.retrieval_score)),
+                    }
+                    for c in top10.itertuples(index=False)
+                ] if not top10.empty else []
 
-            payloads.append(
-                {
+                staged_in_candidates = (
+                    staged_top1 is not None
+                    and not cand_df.empty
+                    and bool((cand_df["fdc_id"] == staged_top1).any())
+                )
+                staged_in_top10 = (
+                    staged_top1 is not None
+                    and not top10.empty
+                    and bool((top10["fdc_id"] == staged_top1).any())
+                )
+
+                payload: dict[str, Any] = {
                     "recipe_id": recipe_id,
                     "ingredient_idx": ingredient_idx,
                     "ingredient": ingredient,
                     "name": name,
                     "preparation": preparation,
-                    "dequantified": str(row.get("dequantified") or ""),
+                    "dequantified": str(part_row.get("dequantified") or ""),
                     "unit": unit,
-                    "quantity": row.get("quantity"),
+                    "quantity": part_row.get("quantity"),
                     "amount_kind": amount_kind,
                     "resolution_plan": plan.to_dict(),
                     "retrieval_tier": retr.retrieval_tier,
@@ -344,7 +358,7 @@ def precompute_payloads_portion(
                     "valid_fdc_ids": valid_fdc_ids,
                     "prompt_desc": prompt_desc,
                     "top10_rows": top10_rows,
-                    "parsed_row": row_dict,
+                    "parsed_row": part_row,
                     "volume_fdc_ids": volume_fdc_ids,
                     "count_fdc_ids": count_fdc_ids,
                     "volume_index": volume_index,
@@ -354,8 +368,17 @@ def precompute_payloads_portion(
                     "llm_water_sentinel": bool(
                         generic_match.is_water_sentinel if generic_match else False
                     ),
+                    "split_part_idx": int(split_meta["split_part_idx"]) if split_meta else 0,
+                    "split_part_count": int(split_meta["split_part_count"]) if split_meta else 1,
+                    "split_source_dequant_norm": (
+                        split_meta["split_source_dequant_norm"] if split_meta else None
+                    ),
+                    "split_part_dequant_norm": (
+                        split_meta["split_part_dequant_norm"] if split_meta else None
+                    ),
+                    "split_part_text": split_meta["split_part_text"] if split_meta else None,
                 }
-            )
+                payloads.append(payload)
 
         chunk_sec = time.perf_counter() - t_chunk
         print(
@@ -455,12 +478,65 @@ def assemble_rows_portion(
     if payload.get("resolution_plan"):
         parsed_for_resolve["resolution_plan"] = payload["resolution_plan"]
 
+    from curator_portion_scale import apply_curator_scale_from_judge
+
+    parsed_for_resolve = apply_curator_scale_from_judge(parsed_for_resolve, judge)
+
+    from curator_manual_volume import inject_manual_volume_anchor
+
+    matched_portion_id: int | None
+    portion_inferred: bool
+    if (
+        judge.get("dequant_cache")
+        and judge.get("curator_scale_quantity") is not None
+        and judge.get("curator_scale_portion_id") is not None
+    ):
+        matched_portion_id = int(judge["curator_scale_portion_id"])
+        portion_inferred = False
+    elif (
+        judge.get("dequant_cache")
+        and judge.get("matched_portion_id") is None
+        and judge.get("portion_ref_unit")
+        and judge.get("portion_gram_weight") is not None
+        and llm_fdc_id is not None
+    ):
+        manual_pid = inject_manual_volume_anchor(
+            payload["volume_index"],
+            judge,
+            int(llm_fdc_id),
+        )
+        if manual_pid is not None:
+            matched_portion_id = manual_pid
+            portion_inferred = False
+        else:
+            matched_portion_id, portion_inferred = resolve_matched_portion_id(
+                llm_fdc_id,
+                judge.get("matched_portion_id"),
+                amount_kind=str(payload["amount_kind"]),
+                unit=parsed_for_resolve.get("unit") or payload.get("unit"),
+                quantity=parsed_for_resolve.get("quantity") or payload.get("quantity"),
+                query_tokens=list(payload.get("portion_query_tokens") or []),
+                portion_index=payload["volume_index"],
+                count_portion_index=payload["count_index"],
+            )
+    else:
+        matched_portion_id, portion_inferred = resolve_matched_portion_id(
+            llm_fdc_id,
+            judge.get("matched_portion_id"),
+            amount_kind=str(payload["amount_kind"]),
+            unit=parsed_for_resolve.get("unit") or payload.get("unit"),
+            quantity=parsed_for_resolve.get("quantity") or payload.get("quantity"),
+            query_tokens=list(payload.get("portion_query_tokens") or []),
+            portion_index=payload["volume_index"],
+            count_portion_index=payload["count_index"],
+        )
+
     gram_result = resolve_grams_from_parsed_row(
         parsed_for_resolve,
         llm_fdc_id,
         portion_index=payload["volume_index"],
         count_portion_index=payload["count_index"],
-        matched_portion_id=judge.get("matched_portion_id"),
+        matched_portion_id=matched_portion_id,
         llm_negligible_calories=negligible,
     )
 
@@ -485,6 +561,11 @@ def assemble_rows_portion(
         "model": model,
         "recipe_id": payload["recipe_id"],
         "ingredient_idx": payload["ingredient_idx"],
+        "split_part_idx": int(payload.get("split_part_idx") or 0),
+        "split_part_count": int(payload.get("split_part_count") or 1),
+        "split_source_dequant_norm": payload.get("split_source_dequant_norm"),
+        "split_part_dequant_norm": payload.get("split_part_dequant_norm"),
+        "split_part_text": payload.get("split_part_text"),
         "ingredient": payload["ingredient"],
         "name": payload["name"],
         "preparation": payload["preparation"],
@@ -503,7 +584,8 @@ def assemble_rows_portion(
         "llm_description": llm_desc,
         "llm_certainty": judge["certainty"],
         "llm_rationale": judge["rationale"],
-        "matched_portion_id": judge.get("matched_portion_id"),
+        "matched_portion_id": matched_portion_id,
+        "portion_inferred": portion_inferred,
         "llm_negligible_calories": negligible,
         "llm_water_sentinel": bool(
             judge.get("is_water_sentinel")

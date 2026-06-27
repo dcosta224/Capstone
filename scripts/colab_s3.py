@@ -62,6 +62,54 @@ def download_s3_file(bucket: str, key: str, local_path: Path, *, quiet: bool = F
         print(f"Downloaded s3://{bucket}/{key} -> {local_path}", flush=True)
 
 
+def s3_key_exists(bucket: str, key: str) -> bool:
+    """Return True when the object exists in S3."""
+    from botocore.exceptions import ClientError
+
+    key = key.lstrip("/")
+    try:
+        _client().head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+
+def download_s3_file_if_exists(
+    bucket: str,
+    key: str,
+    local_path: Path,
+    *,
+    quiet: bool = False,
+) -> bool:
+    """Download object when present; return whether it was downloaded."""
+    if not s3_key_exists(bucket, key):
+        return False
+    download_s3_file(bucket, key, local_path, quiet=quiet)
+    return True
+
+
+def list_s3_keys(bucket: str, prefix: str, *, suffix: str = "") -> list[str]:
+    """List object keys under prefix, optionally filtered by suffix."""
+    prefix = prefix.strip("/")
+    if prefix:
+        prefix = prefix + "/"
+    s3 = _client()
+    paginator = s3.get_paginator("list_objects_v2")
+    keys: list[str] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            if suffix and not key.endswith(suffix):
+                continue
+            keys.append(key)
+    return sorted(keys)
+
+
 def upload_dir_to_s3(local_dir: Path, bucket: str, prefix: str, *, quiet: bool = False) -> int:
     """Upload all files under local_dir to s3://bucket/prefix/. Returns file count."""
     local_dir = Path(local_dir)

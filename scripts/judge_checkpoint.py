@@ -9,7 +9,31 @@ from typing import Any
 
 import pandas as pd
 
-MERGE_KEYS = ("recipe_id", "ingredient_idx")
+MERGE_KEYS = ("recipe_id", "ingredient_idx", "split_part_idx")
+
+
+def _split_part_idx_series(df: pd.DataFrame) -> pd.Series:
+    if "split_part_idx" in df.columns:
+        return df["split_part_idx"].fillna(0).astype(int)
+    return pd.Series(0, index=df.index, dtype=int)
+
+
+def row_merge_key(row: Any) -> tuple[int, int, int]:
+    if hasattr(row, "recipe_id"):
+        sp = int(getattr(row, "split_part_idx", 0) or 0)
+        return (int(row.recipe_id), int(row.ingredient_idx), sp)
+    sp = int(row.get("split_part_idx", 0) or 0)
+    return (int(row["recipe_id"]), int(row["ingredient_idx"]), sp)
+
+
+def completed_keys(df: pd.DataFrame) -> set[tuple[int, int, int]]:
+    if df.empty:
+        return set()
+    sp = _split_part_idx_series(df)
+    return {
+        (int(rid), int(iidx), int(part))
+        for rid, iidx, part in zip(df["recipe_id"], df["ingredient_idx"], sp, strict=True)
+    }
 
 
 def load_judge_checkpoint(path: Path) -> pd.DataFrame:
@@ -24,36 +48,29 @@ def load_judge_checkpoint(path: Path) -> pd.DataFrame:
         raise
 
 
-def completed_keys(df: pd.DataFrame) -> set[tuple[int, int]]:
-    if df.empty:
-        return set()
-    return {
-        (int(r.recipe_id), int(r.ingredient_idx))
-        for r in df.itertuples(index=False)
-    }
-
-
 def merge_judge_checkpoint(path: Path, new_rows: list[dict[str, Any]]) -> int:
-    """Upsert judge rows by (recipe_id, ingredient_idx). Returns total rows on disk."""
+    """Upsert judge rows by (recipe_id, ingredient_idx, split_part_idx)."""
     if not new_rows:
         return len(load_judge_checkpoint(path))
     incoming = pd.DataFrame(new_rows)
+    if "split_part_idx" not in incoming.columns:
+        incoming["split_part_idx"] = 0
     existing = load_judge_checkpoint(path)
     if existing.empty:
         merged = incoming
     else:
-        keys = set(
-            zip(
-                incoming["recipe_id"].astype(int),
-                incoming["ingredient_idx"].astype(int),
-                strict=True,
+        if "split_part_idx" not in existing.columns:
+            existing = existing.copy()
+            existing["split_part_idx"] = 0
+        incoming_sp = _split_part_idx_series(incoming)
+        keys = {
+            (int(rid), int(iidx), int(part))
+            for rid, iidx, part in zip(
+                incoming["recipe_id"], incoming["ingredient_idx"], incoming_sp, strict=True
             )
-        )
+        }
         keep = existing[
-            ~existing.apply(
-                lambda r: (int(r["recipe_id"]), int(r["ingredient_idx"])) in keys,
-                axis=1,
-            )
+            ~existing.apply(lambda r: row_merge_key(r) in keys, axis=1)
         ]
         merged = pd.concat([keep, incoming], ignore_index=True)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +108,10 @@ def combine_judged_checkpoint(
     merged = pd.concat(parts, ignore_index=True)
     if merged.empty:
         return merged
+    if "split_part_idx" not in merged.columns:
+        merged["split_part_idx"] = 0
+    else:
+        merged["split_part_idx"] = merged["split_part_idx"].fillna(0).astype(int)
     return merged.drop_duplicates(subset=list(MERGE_KEYS), keep="last")
 
 

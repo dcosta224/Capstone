@@ -16,7 +16,7 @@ from portion_gram import (
     normalize_count_portion_row,
     normalize_portion_row,
 )
-from unit_convert import UnitConversionError, normalize_volume_unit
+from unit_convert import UnitConversionError, convert_volume, normalize_volume_unit
 from usda_volume_units import text_has_volume
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,7 +180,18 @@ def portion_match_score(
             query_vol = _volume_query_units(query_tokens)
             line_vol = _line_volume_units(line)
             if query_vol and line_vol:
-                score = max(score, 0.45)
+                vol_score = 0.0
+                for qu in query_vol:
+                    for lu in line_vol:
+                        if qu == lu:
+                            vol_score = max(vol_score, 1.0)
+                        else:
+                            try:
+                                convert_volume(1.0, qu, lu)
+                                vol_score = max(vol_score, 0.75)
+                            except UnitConversionError:
+                                pass
+                score = max(score, vol_score)
             if _line_is_volume(line):
                 score += 0.1
         if amount_kind == "count" and line.rules_class == "count":
@@ -208,6 +219,48 @@ def food_aware_portion_score(
     return round(raw_score * factor, 4)
 
 
+def _best_portion_line_for_query(
+    lines: list[PortionSummaryLine],
+    query_tokens: list[str],
+    *,
+    amount_kind: str | None = None,
+) -> PortionSummaryLine | None:
+    if not lines:
+        return None
+    if amount_kind == "volume":
+        query_vol = _volume_query_units(query_tokens)
+        if query_vol:
+            volume_lines = [ln for ln in lines if _line_is_volume(ln)]
+            if volume_lines:
+
+                def vol_line_score(ln: PortionSummaryLine) -> float:
+                    line_vol = _line_volume_units(ln)
+                    if not line_vol:
+                        return 0.0
+                    best = 0.0
+                    for qu in query_vol:
+                        for lu in line_vol:
+                            if qu == lu:
+                                best = max(best, 100.0)
+                            else:
+                                try:
+                                    convert_volume(1.0, qu, lu)
+                                    best = max(best, 50.0)
+                                except UnitConversionError:
+                                    pass
+                    return best
+
+                scored = [(ln, vol_line_score(ln)) for ln in volume_lines]
+                best_score = max(s for _, s in scored)
+                if best_score > 0:
+                    top = [ln for ln, s in scored if s == best_score]
+                    return min(top, key=lambda ln: ln.portion_id)
+    return max(
+        lines,
+        key=lambda ln: portion_match_score([ln], query_tokens, amount_kind=amount_kind),
+    )
+
+
 def summarize_fdc_portions(
     summary_index: dict[int, list[PortionSummaryLine]],
     fdc_id: int,
@@ -222,8 +275,10 @@ def summarize_fdc_portions(
     score = food_aware_portion_score(raw, retrieval_score)
     if not lines:
         return 0.0, "-", None
-    best_line = max(
+    best_line = _best_portion_line_for_query(
         lines,
-        key=lambda ln: portion_match_score([ln], query_tokens, amount_kind=amount_kind),
+        query_tokens,
+        amount_kind=amount_kind,
     )
+    assert best_line is not None
     return score, format_portion_summary_compact(lines, max_lines=4), best_line.portion_id
