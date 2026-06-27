@@ -22,6 +22,8 @@ sys.path.insert(0, str(ROOT / "foodon_web"))
 
 from diet_tags_core import flatten_ingredient_rows, load_diet_tags, tag_ingredient
 from diet_tags_io import load_foods_catalog, load_nutrients_for_fdc, write_table
+from foodon_contains_core import load_contains_table
+from foodon_mapping_io import load_mapping_lookup
 
 OUT_DIR = ROOT / "scratch" / "tag"
 
@@ -32,16 +34,44 @@ def main() -> None:
     parser.add_argument("--no-foodon", action="store_true")
     parser.add_argument("--foodon-min-score", type=float, default=0.55)
     parser.add_argument("--tags-path", type=Path, default=None)
+    parser.add_argument(
+        "--mapping",
+        action="store_true",
+        help="Use scratch/tag/fdc_foodon_mapping and foodon_contains cache when present",
+    )
+    parser.add_argument(
+        "--mapped-only",
+        action="store_true",
+        help="Tag only fdc_ids present in fdc_foodon_mapping (implies useful with --mapping)",
+    )
     args = parser.parse_args()
 
     registry = load_diet_tags(args.tags_path)
-    foods = load_foods_catalog(limit=args.limit)
+    foodon_mapping = load_mapping_lookup() if args.mapping else {}
+    foodon_contains_table = load_contains_table() if args.mapping else None
+    if args.mapped_only:
+        if not foodon_mapping:
+            print("No fdc_foodon_mapping rows found; run link_ingredients_foodon.py first.", flush=True)
+            raise SystemExit(1)
+        foods = load_foods_catalog(fdc_ids=set(foodon_mapping.keys()))
+    else:
+        foods = load_foods_catalog(limit=args.limit)
+    if args.mapping and foodon_mapping and foodon_contains_table is None:
+        print(
+            "Warning: --mapping set but foodon_contains cache missing. "
+            "Run: uv run python scripts/build_foodon_contains_cache.py",
+            flush=True,
+        )
 
     foodon_index = None
-    if not args.no_foodon:
+    if not args.no_foodon or foodon_mapping:
         from foodon_index import FoodOnIndex
+        from foodon_paths import FOODON_INDEX_CACHE
 
-        foodon_index = FoodOnIndex.from_owl()
+        if FOODON_INDEX_CACHE.is_file():
+            foodon_index = FoodOnIndex.from_cache(FOODON_INDEX_CACHE)
+        else:
+            foodon_index = FoodOnIndex.from_owl()
 
     fdc_ids = set(foods["fdc_id"].astype(int).tolist())
     nutrient_ids = {spec.nutrient_id for spec in registry.nutrients.values()}
@@ -56,22 +86,38 @@ def main() -> None:
     long_rows: list[dict] = []
     wide_rows: list[dict] = []
     foodon_maps: list[dict] = []
+    source_counts: dict[str, int] = {}
 
     for row in foods.itertuples(index=False):
         fdc_id = int(row.fdc_id)
         desc = str(row.description)
         ing = str(row.ingredients) if row.ingredients is not None and pd.notna(row.ingredients) else None
+        mapped = foodon_mapping.get(fdc_id)
+        foodon_node_id = mapped["foodon_id"] if mapped else None
+
         result = tag_ingredient(
             fdc_id,
             desc,
             ing,
             registry,
             nutrient_lookup=nutrient_lookup,
-            foodon_index=foodon_index,
+            foodon_index=foodon_index if foodon_contains_table is None else None,
             foodon_min_score=args.foodon_min_score,
+            foodon_node_id=foodon_node_id,
+            foodon_contains_table=foodon_contains_table,
         )
+
+        for meta in result["contains"].values():
+            src = str(meta.get("source") or "unknown")
+            source_counts[src] = source_counts.get(src, 0) + 1
+
         long_rows.extend(flatten_ingredient_rows(result))
         wide = {"fdc_id": fdc_id, "description": desc}
+        if mapped:
+            wide["foodon_id"] = mapped["foodon_id"]
+            wide["foodon_label"] = mapped.get("foodon_label", "")
+            wide["match_method"] = mapped.get("match_method", "")
+            wide["link_confidence"] = mapped.get("confidence", 0.0)
         for tslug, val in result["tags"].items():
             if val is not None:
                 wide[f"tag_{tslug}"] = bool(val)
@@ -102,6 +148,8 @@ def main() -> None:
     summary = {
         "foods_scanned": len(foods),
         "long_rows": len(long_df),
+        "mapped_foods": len(foodon_mapping) if foodon_mapping else 0,
+        "contains_source_counts": source_counts,
         "tag_true_counts": {
             col.replace("tag_", ""): int(wide_df[col].sum())
             for col in wide_df.columns

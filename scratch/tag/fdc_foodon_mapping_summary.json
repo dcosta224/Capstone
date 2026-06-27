@@ -1,0 +1,14 @@
+{
+  "linker_version": "v1_tiered_fuzzy_semantic",
+  "new_rows": 950,
+  "total_rows": 1000,
+  "method_counts": {
+    "llm_judge": 614,
+    "auto_fuzzy": 331,
+    "llm_abstain": 5
+  },
+  "reviewed_count": 5,
+  "linked_count": 945,
+  "elapsed_s": 761.3,
+  "output": "C:\\Users\\winni\\Documents\\GitHub\\Capstone\\Capstone\\scratch\\tag\\fdc_foodon_mapping.csv"
+}

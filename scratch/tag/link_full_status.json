@@ -1,0 +1,25 @@
+{
+  "status": "running",
+  "pid": 52192,
+  "last_updated": "2026-06-27T08:00:25.763997+00:00",
+  "started_at": "2026-06-27T07:53:29+00:00",
+  "catalog_foods": 96996,
+  "mapping_rows": 1500,
+  "new_rows_this_run": 500,
+  "linked_with_foodon_id": 1489,
+  "checkpoint_every": 500,
+  "last_checkpoint_mtime": "Sat Jun 27 01:00:14 2026",
+  "method_counts": {
+    "llm_judge": 966,
+    "auto_fuzzy": 523,
+    "llm_abstain": 11
+  },
+  "elapsed_hours": 0.12,
+  "links_per_second": 1.2,
+  "eta_hours_remaining": 22.1,
+  "log_file": "scratch/tag/link_full.log",
+  "mapping_output": "scratch/tag/fdc_foodon_mapping.csv",
+  "llm_model": "qwen/qwen3.6-35b-a3b",
+  "llm_url": "http://10.0.0.2:1234/v1",
+  "notes": "LM Studio must stay up at 10.0.0.2. Resume-safe: re-run same command if interrupted (skips existing fdc_ids)."
+}

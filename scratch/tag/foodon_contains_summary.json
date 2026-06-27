@@ -1,0 +1,226 @@
+{
+  "nodes": 28947,
+  "contains_slugs": [
+    "alcohol",
+    "dairy",
+    "egg",
+    "fish",
+    "honey",
+    "peanut",
+    "pork",
+    "poultry",
+    "red_meat",
+    "root_vegetable",
+    "sesame",
+    "shellfish",
+    "soy",
+    "tree_nut",
+    "wheat"
+  ],
+  "tagged_counts": {
+    "alcohol": 197,
+    "dairy": 1046,
+    "egg": 81,
+    "fish": 1130,
+    "honey": 35,
+    "peanut": 80,
+    "pork": 143,
+    "poultry": 414,
+    "red_meat": 207,
+    "root_vegetable": 428,
+    "sesame": 15,
+    "shellfish": 546,
+    "soy": 69,
+    "tree_nut": 238,
+    "wheat": 197
+  },
+  "ancestor_roots": [
+    {
+      "contains_slug": "dairy",
+      "ancestor_id": "FOODON_03315150",
+      "ancestor_label": "mammalian milk product",
+      "descendant_count": 108,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "dairy",
+      "ancestor_id": "FOODON_00001256",
+      "ancestor_label": "dairy food product",
+      "descendant_count": 1047,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "egg",
+      "ancestor_id": "FOODON_00001274",
+      "ancestor_label": "egg food product",
+      "descendant_count": 81,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "fish",
+      "ancestor_id": "FOODON_00001248",
+      "ancestor_label": "fish food product",
+      "descendant_count": 1130,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "shellfish",
+      "ancestor_id": "FOODON_00001293",
+      "ancestor_label": "shellfish food product",
+      "descendant_count": 546,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "peanut",
+      "ancestor_id": "FOODON_00002099",
+      "ancestor_label": "peanut food product",
+      "descendant_count": 80,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "tree_nut",
+      "ancestor_id": "FOODON_00001172",
+      "ancestor_label": "nut food product",
+      "descendant_count": 318,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "tree_nut",
+      "ancestor_id": "FOODON_00002099",
+      "ancestor_label": "peanut food product",
+      "descendant_count": 80,
+      "status": "exclude"
+    },
+    {
+      "contains_slug": "soy",
+      "ancestor_id": "FOODON_00002266",
+      "ancestor_label": "soybean food product",
+      "descendant_count": 69,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "wheat",
+      "ancestor_id": "FOODON_00001141",
+      "ancestor_label": "wheat food product",
+      "descendant_count": 197,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "sesame",
+      "ancestor_id": "FOODON_00002232",
+      "ancestor_label": "sesame food product",
+      "descendant_count": 15,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "red_meat",
+      "ancestor_id": "FOODON_00001134",
+      "ancestor_label": "bovine meat food product",
+      "descendant_count": 169,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "red_meat",
+      "ancestor_id": "FOODON_00001992",
+      "ancestor_label": "lamb meat food product",
+      "descendant_count": 20,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "red_meat",
+      "ancestor_id": "FOODON_00003083",
+      "ancestor_label": "veal",
+      "descendant_count": 10,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "red_meat",
+      "ancestor_id": "FOODON_00001701",
+      "ancestor_label": "cattle soup food product",
+      "descendant_count": 14,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "red_meat",
+      "ancestor_id": "FOODON_00002956",
+      "ancestor_label": "game meat",
+      "descendant_count": 4,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "pork",
+      "ancestor_id": "FOODON_00001038",
+      "ancestor_label": "pork meat food product",
+      "descendant_count": 114,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "pork",
+      "ancestor_id": "FOODON_00001132",
+      "ancestor_label": "swine food product",
+      "descendant_count": 143,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "poultry",
+      "ancestor_id": "FOODON_00001131",
+      "ancestor_label": "poultry meat food product",
+      "descendant_count": 390,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "poultry",
+      "ancestor_id": "FOODON_00001728",
+      "ancestor_label": "chicken soup food product",
+      "descendant_count": 24,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "honey",
+      "ancestor_id": "FOODON_00001178",
+      "ancestor_label": "honey food product",
+      "descendant_count": 36,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "alcohol",
+      "ancestor_id": "FOODON_00001579",
+      "ancestor_label": "alcoholic beverage",
+      "descendant_count": 197,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "root_vegetable",
+      "ancestor_id": "FOODON_00002150",
+      "ancestor_label": "plant root vegetable food product",
+      "descendant_count": 252,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "root_vegetable",
+      "ancestor_id": "FOODON_00001148",
+      "ancestor_label": "potato food product",
+      "descendant_count": 155,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "root_vegetable",
+      "ancestor_id": "FOODON_00002069",
+      "ancestor_label": "onion food product",
+      "descendant_count": 70,
+      "status": "ok"
+    },
+    {
+      "contains_slug": "root_vegetable",
+      "ancestor_id": "FOODON_00001895",
+      "ancestor_label": "garlic food product",
+      "descendant_count": 23,
+      "status": "ok"
+    }
+  ],
+  "overrides_path": "C:\\Users\\winni\\Documents\\GitHub\\Capstone\\Capstone\\data\\foodon_contains_overrides.json",
+  "overrides_applied": {
+    "force": 0,
+    "clear": 0
+  }
+}

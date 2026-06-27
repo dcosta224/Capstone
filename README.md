@@ -392,14 +392,26 @@ Precise ingredient/recipe tags for diabetes, osteoporosis, and dietary restricti
 | `scripts/tag_recipes_local.py` | Recipe rollup from resolved lines + ingredient tags |
 | `scripts/tag_mvp_recipes.py` | Tag MVP corpus recipes; writes `scratch/tag/recipe_diet_tags_wide` |
 | `scripts/diet_tags_corpus.py` | Build `recipe_diet_tags` for MVP corpus cache |
+| `scripts/build_foodon_embed_index.py` | Embed FoodOn labels for semantic retrieval |
+| `scripts/build_foodon_contains_cache.py` | Precompute `foodon_id` → allergen `contains_*` from ontology |
+| `scripts/link_ingredients_foodon.py` | Batch `fdc_id` → FoodOn mapping (fuzzy + semantic + optional Ollama) |
 | `scripts/check_tagging_env.py` | Environment sanity check |
 
 ```bash
 # Local FoodOn index (one-time, reads Data/foodon-master/foodon.owl)
 uv run python scripts/build_foodon_index_cache.py
 
-# Ingredient diet tags (restrictions + nutrition goals)
-uv run python scripts/tag_ingredients.py --limit 10000
+# FoodOn semantic index + tiered fdc_id mapping (offline batch)
+uv run python scripts/build_foodon_embed_index.py
+uv run python scripts/link_ingredients_foodon.py --limit 10000
+
+# FoodOn allergen contains cache (ontology ancestor propagation — issue 9 core)
+uv run python scripts/build_foodon_contains_cache.py
+# optional LLM rerank on uncertain rows:
+# uv run python scripts/link_ingredients_foodon.py --limit 1000 --ollama-model qwen2.5:7b
+
+# Ingredient diet tags (use mapping table when present)
+uv run python scripts/tag_ingredients.py --limit 10000 --mapping
 
 # Recipe rollup (needs resolved recipe parquet/csv)
 uv run python scripts/tag_recipes_local.py --resolved path/to/lines.parquet

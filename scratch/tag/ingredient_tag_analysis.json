@@ -1,0 +1,9 @@
+{
+  "mapped_total": 995,
+  "foods_in_catalog": 995,
+  "keyword_only": 780,
+  "cache_only": 4,
+  "both": 16,
+  "neither": 195,
+  "low_confidence_with_contains": 22
+}

@@ -18,6 +18,7 @@ class ContainsTrigger:
     slug: str
     keywords: tuple[str, ...]
     foodon_ancestors: tuple[str, ...]
+    foodon_ancestors_exclude: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ def load_diet_tags(path: Path | None = None) -> DietTagsRegistry:
             slug=slug,
             keywords=tuple(str(k).lower() for k in spec.get("keywords", [])),
             foodon_ancestors=tuple(spec.get("foodon_ancestors", [])),
+            foodon_ancestors_exclude=tuple(spec.get("foodon_ancestors_exclude", [])),
         )
         for slug, spec in raw["contains"].items()
     }
@@ -78,6 +80,8 @@ def detect_contains(
     *,
     foodon_index: Any | None = None,
     foodon_min_score: float = 0.55,
+    foodon_node_id: str | None = None,
+    foodon_contains_table: Any | None = None,
 ) -> dict[str, dict[str, str]]:
     """Return contains_slug -> {source, matched_term}."""
     hits: dict[str, dict[str, str]] = {}
@@ -101,15 +105,35 @@ def detect_contains(
     if ingredients_text:
         _try_text("ingredients", ingredients_text)
 
-    if foodon_index is not None and description.strip():
+    node_id: str | None = foodon_node_id
+    if node_id is None and foodon_index is not None and description.strip():
         match = foodon_index.best_match(description, min_score=foodon_min_score)
         if match is not None:
             node_id = str(match["id"])
-            for trigger in registry.contains.values():
-                if trigger.slug in hits or not trigger.foodon_ancestors:
-                    continue
-                if foodon_index.matches_any_ancestor(node_id, trigger.foodon_ancestors):
-                    hits[trigger.slug] = {"source": "foodon", "matched_term": node_id}
+
+    if node_id and foodon_contains_table is not None:
+        from foodon_contains_core import lookup_contains
+
+        for slug in lookup_contains(node_id, foodon_contains_table):
+            if slug in hits:
+                continue
+            hits[slug] = {
+                "source": "foodon_cache" if foodon_node_id else "foodon_cache_fuzzy",
+                "matched_term": node_id,
+            }
+    elif foodon_index is not None and node_id:
+        for trigger in registry.contains.values():
+            if trigger.slug in hits or not trigger.foodon_ancestors:
+                continue
+            if foodon_index.matches_any_ancestor(node_id, trigger.foodon_ancestors):
+                excluded = False
+                if trigger.foodon_ancestors_exclude:
+                    excluded = foodon_index.matches_any_ancestor(
+                        node_id, trigger.foodon_ancestors_exclude
+                    )
+                if not excluded:
+                    source = "foodon_mapping" if foodon_node_id else "foodon"
+                    hits[trigger.slug] = {"source": source, "matched_term": node_id}
 
     return hits
 
@@ -179,6 +203,8 @@ def tag_ingredient(
     nutrient_lookup: dict[tuple[int, int], float] | None = None,
     foodon_index: Any | None = None,
     foodon_min_score: float = 0.55,
+    foodon_node_id: str | None = None,
+    foodon_contains_table: Any | None = None,
 ) -> dict[str, Any]:
     """Return contains map, nutrients per 100g, and user-facing ingredient tag booleans."""
     contains_hits = detect_contains(
@@ -187,6 +213,8 @@ def tag_ingredient(
         registry,
         foodon_index=foodon_index,
         foodon_min_score=foodon_min_score,
+        foodon_node_id=foodon_node_id,
+        foodon_contains_table=foodon_contains_table,
     )
     contains_set = set(contains_hits.keys())
     nutrients = nutrient_values_per_100g(nutrient_lookup or {}, registry, fdc_id)

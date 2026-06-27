@@ -1,0 +1,6 @@
+{
+  "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+  "count": 39852,
+  "dims": 384,
+  "foodon_index_cache": "C:\\Users\\winni\\Documents\\GitHub\\Capstone\\Capstone\\scratch\\foodon_index.json"
+}

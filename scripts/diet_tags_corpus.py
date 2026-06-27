@@ -7,6 +7,9 @@ from typing import Any
 import pandas as pd
 
 from diet_tags_core import load_diet_tags, tag_ingredient, tag_recipe
+from diet_tags_io import load_branded_ingredients_lookup
+from foodon_contains_core import load_contains_table
+from foodon_mapping_io import load_mapping_lookup
 
 # Map diet_tags contains slugs to allergen_taxonomy restriction keys.
 CONTAINS_TO_RESTRICTION: dict[str, str] = {
@@ -33,18 +36,6 @@ def nutrient_lookup_from_food_df(food_nutrients: pd.DataFrame) -> dict[tuple[int
         if pd.notna(row.amount):
             lookup[(int(row.fdc_id), int(row.nutrient_id))] = float(row.amount)
     return lookup
-
-
-def _optional_foodon_index():
-    try:
-        from foodon_paths import FOODON_INDEX_CACHE
-        from foodon_index import FoodOnIndex
-
-        if FOODON_INDEX_CACHE.is_file():
-            return FoodOnIndex.from_cache(FOODON_INDEX_CACHE)
-        return FoodOnIndex.from_owl()
-    except Exception:
-        return None
 
 
 def _recipe_nutrient_totals(
@@ -92,7 +83,8 @@ def build_recipe_diet_tags_for_corpus(
     """
     registry = load_diet_tags()
     nutrient_lookup = nutrient_lookup_from_food_df(food_nutrients)
-    foodon_index = _optional_foodon_index() if use_foodon else None
+    foodon_mapping = load_mapping_lookup() if use_foodon else {}
+    foodon_contains_table = load_contains_table() if use_foodon else None
 
     fdc_meta: dict[int, tuple[str, str | None]] = {}
     for ing_df in ingredients_by_recipe.values():
@@ -105,15 +97,21 @@ def build_recipe_diet_tags_for_corpus(
             desc = str(row.fdc_description) if row.fdc_description is not None and pd.notna(row.fdc_description) else ""
             fdc_meta[fdc_id] = (desc, None)
 
+    branded_lookup = load_branded_ingredients_lookup(set(fdc_meta.keys()))
+    for fdc_id, (desc, _) in fdc_meta.items():
+        fdc_meta[fdc_id] = (desc, branded_lookup.get(fdc_id))
+
     ingredient_cache: dict[int, dict[str, Any]] = {}
     for fdc_id, (desc, ing_text) in fdc_meta.items():
+        mapped = foodon_mapping.get(fdc_id)
         tagged = tag_ingredient(
             fdc_id,
             desc,
             ing_text,
             registry,
             nutrient_lookup=nutrient_lookup,
-            foodon_index=foodon_index,
+            foodon_node_id=mapped["foodon_id"] if mapped else None,
+            foodon_contains_table=foodon_contains_table,
         )
         ingredient_cache[fdc_id] = {
             "contains_set": set(tagged["contains_set"]),
