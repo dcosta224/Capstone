@@ -1,14 +1,15 @@
 {
   "linker_version": "v1_tiered_fuzzy_semantic",
-  "new_rows": 950,
-  "total_rows": 1000,
+  "new_rows": 95996,
+  "total_rows": 96996,
   "method_counts": {
-    "llm_judge": 614,
-    "auto_fuzzy": 331,
-    "llm_abstain": 5
+    "llm_judge": 66722,
+    "auto_fuzzy": 28052,
+    "llm_abstain": 1200,
+    "auto_semantic": 22
   },
-  "reviewed_count": 5,
-  "linked_count": 945,
-  "elapsed_s": 761.3,
+  "reviewed_count": 1200,
+  "linked_count": 94796,
+  "elapsed_s": 107826.0,
   "output": "C:\\Users\\winni\\Documents\\GitHub\\Capstone\\Capstone\\scratch\\tag\\fdc_foodon_mapping.csv"
 }

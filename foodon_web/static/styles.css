@@ -36,6 +36,28 @@ header p {
   color: var(--muted);
 }
 
+.carbonara-link {
+  margin-top: 0.35rem;
+  font-size: 0.92rem;
+}
+
+.carbonara-link.hidden {
+  display: none;
+}
+
+.browser-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+@media (max-width: 900px) {
+  .browser-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -213,6 +235,144 @@ header p {
 .empty-state {
   color: var(--muted);
   padding: 0.5rem 0;
+}
+
+.filter-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.filter-toolbar label {
+  font-weight: 600;
+}
+
+.filter-hint {
+  margin: 0 0 0.65rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.filter-clear {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.contains-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.filter-chip {
+  border: 1px solid color-mix(in srgb, var(--pill-color) 35%, var(--border));
+  background: color-mix(in srgb, var(--pill-color) 10%, #fff);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.28rem 0.65rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.filter-chip.active {
+  background: color-mix(in srgb, var(--pill-color) 22%, #fff);
+  border-color: var(--pill-color);
+  font-weight: 600;
+}
+
+.contains-pill {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pill-color) 14%, #fff);
+  color: color-mix(in srgb, var(--pill-color) 85%, #000);
+  border: 1px solid color-mix(in srgb, var(--pill-color) 30%, var(--border));
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  vertical-align: middle;
+}
+
+.contains-pill.compact {
+  margin-left: 0.25rem;
+  padding: 0.02rem 0.35rem;
+  font-size: 0.68rem;
+}
+
+.node-text.dimmed {
+  opacity: 0.45;
+}
+
+.tree-node.filter-hidden {
+  display: none;
+}
+
+.detail-panel h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.15rem;
+}
+
+.detail-id {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.detail-subtitle {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.contains-flag-grid {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.contains-flag-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.contains-flag-row.active {
+  background: color-mix(in srgb, var(--pill-color) 8%, #fff);
+}
+
+.contains-flag-name {
+  text-transform: capitalize;
+}
+
+.contains-flag-value {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--pill-color) 80%, #000);
+}
+
+.search-hit-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+
+.search-hit-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
 }
 
 @media (max-width: 700px) {

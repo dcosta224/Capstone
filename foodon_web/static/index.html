@@ -11,7 +11,9 @@
     <header>
       <h1>FoodOn Browser</h1>
       <p>Traverse the FoodOn ontology. Expand categories to browse subcategories; counts show total descendants.</p>
-      <p><a href="/carbonara">Spaghetti Carbonara composition explorer</a> — gram-share distributions mapped to FoodOn.</p>
+      <p id="carbonara-link" class="carbonara-link hidden">
+        <a href="/carbonara">Spaghetti Carbonara composition explorer</a> — gram-share distributions mapped to FoodOn.
+      </p>
     </header>
 
     <section class="panel search-panel">
@@ -23,13 +25,30 @@
       <div id="search-results" class="search-results hidden"></div>
     </section>
 
-    <section class="panel tree-panel">
-      <div class="tree-toolbar">
-        <h2>Hierarchy</h2>
-        <span id="status-text" class="status-text">Loading ontology…</span>
+    <section id="contains-filter-panel" class="panel filter-panel hidden">
+      <div class="filter-toolbar">
+        <label for="contains-filter">Browse contains subtree</label>
+        <button id="contains-filter-clear" type="button" class="filter-clear">Clear</button>
       </div>
-      <div id="tree-root" class="tree-root" role="tree" aria-label="FoodOn class hierarchy"></div>
+      <p class="filter-hint">Opens the FoodOn hierarchy from each ancestor root for that restriction (e.g. all classes under dairy food product).</p>
+      <div id="contains-filters" class="contains-filters" role="group" aria-label="Contains dimension filters"></div>
     </section>
+
+    <div class="browser-layout">
+      <section class="panel tree-panel">
+        <div class="tree-toolbar">
+          <h2>Hierarchy</h2>
+          <span id="status-text" class="status-text">Loading ontology…</span>
+        </div>
+        <div id="tree-root" class="tree-root" role="tree" aria-label="FoodOn class hierarchy"></div>
+      </section>
+
+      <section id="detail-panel" class="panel detail-panel hidden">
+        <h2 id="detail-title">Class details</h2>
+        <p id="detail-id" class="detail-id"></p>
+        <div id="detail-contains" class="detail-contains"></div>
+      </section>
+    </div>
   </main>
 
   <script src="/static/app.js"></script>
