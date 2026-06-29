@@ -10,8 +10,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 import pandas as pd
 import psycopg2.extras
@@ -33,6 +35,9 @@ RECIPE_CSV = ROOT / "Data" / "recipes" / "RecipeNLG.csv"
 SCHEMA_SQL = ROOT / "sql" / "11_create_resolved_recipes.sql"
 NULLABLE_GRAMS_SQL = ROOT / "sql" / "12_alter_resolved_recipes_nullable_grams.sql"
 NEGLIGIBLE_CALORIES_SQL = ROOT / "sql" / "13_alter_resolved_recipes_negligible_calories.sql"
+IS_CANONICAL_SQL = ROOT / "sql" / "39_alter_resolved_recipes_is_canonical.sql"
+DEFAULT_EXTENDED_MANIFEST = ROOT / "Data" / "recipes" / "cuisine_nlg_extended_manifest.json"
+DEFAULT_CAP_MANIFEST = ROOT / "Data" / "recipes" / "cuisine_nlg_cap40_manifest.json"
 DEFAULT_CUISINE_OUT = ROOT / "scratch" / "EDA" / "cuisine_nlg_v7_cap40"
 
 INSERT_COLS = [
@@ -51,9 +56,101 @@ INSERT_COLS = [
     "grams_status",
     "negligible_calories",
     "feasibility_version",
+    "is_canonical",
 ]
 
 UPSERT_UPDATE_COLS = [c for c in INSERT_COLS if c not in ("recipe_id", "ingredient_idx")]
+
+RESOLVED_UPSERT_BATCH_SIZE = 500
+
+
+def _row_attr(row: Any, name: str, default=None):
+    if isinstance(row, dict):
+        return row.get(name, default)
+    return getattr(row, name, default)
+
+
+def row_ready_for_resolved_upload(row: Any) -> bool:
+    """True when a line has final grams suitable for recipe.resolved_recipes."""
+    grams = _row_attr(row, "grams")
+    if grams is not None and not (isinstance(grams, float) and pd.isna(grams)):
+        return True
+    status = _row_attr(row, "grams_status") or _row_attr(row, "rules_grams_status")
+    return status == "negligible_calories"
+
+
+def _row_to_dict(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    if hasattr(row, "_asdict"):
+        return row._asdict()
+    return dict(row)
+
+
+class ResolvedRecipesBatcher:
+    """Queue pipeline-complete lines and upsert to recipe.resolved_recipes in batches."""
+
+    def __init__(
+        self,
+        conn,
+        *,
+        batch_size: int = RESOLVED_UPSERT_BATCH_SIZE,
+        canonical_recipe_ids: set[int] | None = None,
+        feasibility_version: int | None = 7,
+        log_fn: Callable[[str], None] | None = None,
+    ) -> None:
+        self.conn = conn
+        self.batch_size = batch_size
+        self._canonical_recipe_ids = canonical_recipe_ids
+        self.feasibility_version = feasibility_version
+        self.log_fn = log_fn
+        self._pending: list[dict[str, Any]] = []
+        self.total_uploaded = 0
+
+    def _canonical_ids(self) -> set[int]:
+        if self._canonical_recipe_ids is None:
+            self._canonical_recipe_ids = load_canonical_recipe_ids()
+        return self._canonical_recipe_ids
+
+    def add_row(self, row: Any) -> None:
+        if not row_ready_for_resolved_upload(row):
+            return
+        self._pending.append(_row_to_dict(row))
+        if len(self._pending) >= self.batch_size:
+            self.flush()
+
+    def flush(self) -> int:
+        if not self._pending:
+            return 0
+        df = pd.DataFrame(self._pending)
+        self._pending = []
+        n = upsert_resolved_lines(
+            self.conn,
+            df,
+            canonical_recipe_ids=self._canonical_ids(),
+            feasibility_version=self.feasibility_version,
+        )
+        self.total_uploaded += n
+        if n and self.log_fn:
+            self.log_fn(f"Upserted {n:,} row(s) into recipe.resolved_recipes")
+        return n
+
+
+def load_canonical_recipe_ids(manifest_path: Path | None = None) -> set[int]:
+    """Recipe ids flagged is_canonical=true (canonical cap-40 corpus)."""
+    for path in (
+        manifest_path,
+        DEFAULT_EXTENDED_MANIFEST if DEFAULT_EXTENDED_MANIFEST.is_file() else None,
+        DEFAULT_CAP_MANIFEST,
+    ):
+        if path is None or not Path(path).is_file():
+            continue
+        data = json.loads(Path(path).read_text())
+        if "canonical_recipe_ids" in data:
+            return {int(x) for x in data["canonical_recipe_ids"]}
+        if data.get("source") == "cuisine_nlg_cap40":
+            return {int(x) for x in data["recipe_ids"]}
+    return set()
 
 
 def build_upsert_sql() -> str:
@@ -204,6 +301,7 @@ def build_resolved_rows(
     fdc_desc: dict[int, str],
     portion_labels: dict[int, str],
     feasibility_version: int | None,
+    canonical_recipe_ids: set[int] | None = None,
 ) -> list[tuple]:
     sub = matches[matches["recipe_id"].astype(int).isin(recipe_ids)].copy()
     rows: list[tuple] = []
@@ -242,9 +340,62 @@ def build_resolved_rows(
                 str(getattr(r, "grams_status", None) or "") or None,
                 is_negligible_calories(r),
                 feasibility_version,
+                rid in canonical_recipe_ids if canonical_recipe_ids is not None else False,
             )
         )
     return rows
+
+
+def upsert_resolved_lines(
+    conn,
+    matches: pd.DataFrame,
+    *,
+    canonical_recipe_ids: set[int] | None = None,
+    feasibility_version: int | None = 7,
+) -> int:
+    """Upsert ingredient lines into recipe.resolved_recipes (immediate upload path)."""
+    if matches.empty:
+        return 0
+    recipe_ids = {int(x) for x in matches["recipe_id"].unique()}
+    with conn.cursor() as cur:
+        titles = load_titles_from_db(cur, sorted(recipe_ids))
+    missing = recipe_ids - set(titles.keys())
+    if missing:
+        titles.update(load_titles_from_csv(missing))
+
+    fdc_ids = sorted(
+        {
+            normalize_fdc_id(x)
+            for x in matches["llm_fdc_id"]
+            if normalize_fdc_id(x) is not None
+        }
+    )
+    portion_ids: list[int] = []
+    for r in matches.itertuples(index=False):
+        ak = str(getattr(r, "amount_kind_final", "") or getattr(r, "amount_kind", "") or "")
+        if ak != "mass":
+            pid = extract_portion_id(r)
+            if pid is not None:
+                portion_ids.append(pid)
+    portion_ids = sorted(set(portion_ids))
+
+    with conn.cursor() as cur:
+        fdc_desc = fetch_fdc_descriptions(cur, fdc_ids)
+        portion_labels = fetch_portion_labels(cur, portion_ids)
+        rows = build_resolved_rows(
+            matches,
+            recipe_ids,
+            titles,
+            fdc_desc,
+            portion_labels,
+            feasibility_version,
+            canonical_recipe_ids=canonical_recipe_ids,
+        )
+        if not rows:
+            return 0
+        psycopg2.extras.execute_values(cur, build_upsert_sql(), rows, page_size=500)
+    conn.commit()
+    return len(rows)
 
 
 def main() -> None:
@@ -366,6 +517,10 @@ def main() -> None:
             fdc_desc = fetch_fdc_descriptions(cur, fdc_ids)
             portion_labels = fetch_portion_labels(cur, portion_ids)
 
+        canonical_ids = load_canonical_recipe_ids(
+            Path(args.sample_manifest) if args.sample_manifest else None
+        )
+
         rows = build_resolved_rows(
             matches,
             recipe_ids,
@@ -373,6 +528,7 @@ def main() -> None:
             fdc_desc,
             portion_labels,
             feasibility_version,
+            canonical_recipe_ids=canonical_ids,
         )
 
         n_with_portion = sum(1 for r in rows if r[6] is not None)
@@ -389,7 +545,7 @@ def main() -> None:
             return
 
         with conn.cursor() as cur:
-            schema_paths = [SCHEMA_SQL, NEGLIGIBLE_CALORIES_SQL]
+            schema_paths = [SCHEMA_SQL, NEGLIGIBLE_CALORIES_SQL, IS_CANONICAL_SQL]
             if args.all_lines:
                 schema_paths.append(NULLABLE_GRAMS_SQL)
             apply_schema_sql(cur, schema_paths)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -35,5 +36,27 @@ def database_url() -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{database}?sslmode={sslmode}"
 
 
-def connect():
-    return psycopg2.connect(database_url())
+def connect(*, max_retries: int = 5, retry_delay: float = 1.0):
+    """Open a Postgres connection with retries for flaky pooler handshakes."""
+    url = database_url()
+    delay = retry_delay
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return psycopg2.connect(
+                url,
+                client_encoding="UTF8",
+                connect_timeout=30,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+        except psycopg2.OperationalError as exc:
+            last_exc = exc
+            if attempt + 1 >= max_retries:
+                break
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+    assert last_exc is not None
+    raise last_exc

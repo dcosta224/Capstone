@@ -125,6 +125,8 @@ def precompute_payloads_portion(
     chunk_size: int = 256,
     progress_writer: Any = None,
     dequant_splits: dict | None = None,
+    only_keys: set[tuple[int, int]] | None = None,
+    quiet: bool = False,
 ) -> list[dict[str, Any]]:
     if dequant_splits is None:
         dequant_splits = load_dequant_norm_splits()
@@ -134,49 +136,56 @@ def precompute_payloads_portion(
     count_fdc_ids = set(capabilities.count_fdc_ids)
 
     n_chunks = (n + chunk_size - 1) // chunk_size
-    print(
-        f"Batched portion-aware retrieval: {n} ingredients in {n_chunks} chunk(s) of {chunk_size}",
-        flush=True,
-    )
-    if n:
-        preview_n = min(5, n)
-        print(f"  first {preview_n} ingredient(s):", flush=True)
-        for pi in range(preview_n):
-            row = parsed.iloc[pi]
-            print(
-                f"    [{pi + 1}] recipe={int(row['recipe_id'])} "
-                f"idx={int(row['ingredient_idx'])} "
-                f"{str(row.get('ingredient', ''))[:100]}",
-                flush=True,
-            )
+    if not quiet:
+        print(
+            f"Batched portion-aware retrieval: {n} ingredients in {n_chunks} chunk(s) of {chunk_size}",
+            flush=True,
+        )
+        if n:
+            preview_n = min(5, n)
+            print(f"  first {preview_n} ingredient(s):", flush=True)
+            for pi in range(preview_n):
+                row = parsed.iloc[pi]
+                print(
+                    f"    [{pi + 1}] recipe={int(row['recipe_id'])} "
+                    f"idx={int(row['ingredient_idx'])} "
+                    f"{str(row.get('ingredient', ''))[:100]}",
+                    flush=True,
+                )
 
-    show_progress = progress_writer is None or progress_writer.show_secondary_progress
-    progress = iter_progress(range(n), total=n, desc="Retrieval + prompts", enabled=show_progress)
+    show_progress = (not quiet) and (
+        progress_writer is None or progress_writer.show_secondary_progress
+    )
+    progress = iter_progress(
+        range(n), total=n, desc="Retrieval + prompts", enabled=show_progress, force=quiet
+    )
     progress_iter = iter(progress)
 
     for chunk_idx, start in enumerate(range(0, n, chunk_size), start=1):
         end = min(start + chunk_size, n)
         chunk_n = end - start
         t_chunk = time.perf_counter()
-        print(
-            f"  chunk {chunk_idx}/{n_chunks}: rows {start}-{end - 1} ({chunk_n} ingredients) "
-            f"— batched dequant similarities…",
-            flush=True,
-        )
+        if not quiet:
+            print(
+                f"  chunk {chunk_idx}/{n_chunks}: rows {start}-{end - 1} ({chunk_n} ingredients) "
+                f"— batched dequant similarities…",
+                flush=True,
+            )
         t_sims = time.perf_counter()
         sims_chunk = batched_dequant_similarities(food_index, dequant_emb[start:end])
         sims_sec = time.perf_counter() - t_sims
-        if sims_chunk.size:
-            print(
-                f"  chunk {chunk_idx}/{n_chunks}: dequant sims {sims_sec:.1f}s "
-                f"({sims_chunk.shape[0]:,} foods × {sims_chunk.shape[1]} queries)",
-                flush=True,
-            )
-        else:
-            print(
-                f"  chunk {chunk_idx}/{n_chunks}: dequant sims {sims_sec:.1f}s (empty)",
-                flush=True,
-            )
+        if not quiet:
+            if sims_chunk.size:
+                print(
+                    f"  chunk {chunk_idx}/{n_chunks}: dequant sims {sims_sec:.1f}s "
+                    f"({sims_chunk.shape[0]:,} foods × {sims_chunk.shape[1]} queries)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"  chunk {chunk_idx}/{n_chunks}: dequant sims {sims_sec:.1f}s (empty)",
+                    flush=True,
+                )
 
         for i in range(start, end):
             next(progress_iter, None)
@@ -195,6 +204,8 @@ def precompute_payloads_portion(
             row_dict = row.to_dict()
             recipe_id = int(row["recipe_id"])
             ingredient_idx = int(row["ingredient_idx"])
+            if only_keys is not None and (recipe_id, ingredient_idx) not in only_keys:
+                continue
             ingredient = str(row["ingredient"])
 
             for part_row, split_meta in iter_split_part_rows(row_dict, dequant_splits):

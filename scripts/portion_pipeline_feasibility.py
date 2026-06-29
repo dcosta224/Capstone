@@ -342,12 +342,21 @@ def classify_ingredient_lines(
     progress_writer: Any = None,
     enrichment_concurrency: int = 8,
     only_enrich_keys: set[tuple[int, int]] | None = None,
+    skip_sync_enrichment: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Rules parse + resolution plan; selective LLM line enrichment."""
+    from progress_utils import iter_progress
+
     rows: list[dict[str, Any]] = []
     enrich_items: list[tuple[str, dict[str, Any]]] = []
+    row_list = list(recipe_ingredients.itertuples(index=False))
 
-    for row in recipe_ingredients.itertuples(index=False):
+    for row in iter_progress(
+        row_list,
+        total=len(row_list),
+        desc="amount rules parse",
+        force=True,
+    ):
         ingredient = str(row.ingredient)
         key = _ingredient_key(int(row.recipe_id), int(row.ingredient_idx))
         rules = resolve_quantity_fields(ingredient, method="rules")
@@ -372,7 +381,7 @@ def classify_ingredient_lines(
 
     llm_cache: dict[str, dict[str, Any]] = {}
     llm_log: list[dict[str, Any]] = []
-    if enrich_items:
+    if enrich_items and not skip_sync_enrichment:
         llm_cache, llm_log = run_line_enrichment_sync(
             enrich_items,
             model=model,
@@ -1572,6 +1581,9 @@ def run_feasibility(
     dequant_cache_path: Path | None = None,
     no_dequant_cache: bool = False,
     skip_resolved_in_db: bool = False,
+    batch_mode: bool = False,
+    skip_judging: bool = False,
+    early_dequant_only: bool = False,
 ) -> dict[str, Any]:
     load_dotenv()
     retry_mode = partial_retry_mode(
@@ -1661,6 +1673,9 @@ def run_feasibility(
             dequant_cache_path=dequant_cache_path,
             no_dequant_cache=no_dequant_cache,
             skip_resolved_in_db=skip_resolved_in_db,
+            batch_mode=batch_mode,
+            skip_judging=skip_judging,
+            early_dequant_only=early_dequant_only,
         )
 
 
@@ -1700,6 +1715,9 @@ def _run_feasibility_pipeline(
     dequant_cache_path: Path | None = None,
     no_dequant_cache: bool = False,
     skip_resolved_in_db: bool = False,
+    batch_mode: bool = False,
+    skip_judging: bool = False,
+    early_dequant_only: bool = False,
 ) -> dict[str, Any]:
     from sample_recipes import DEFAULT_RECIPE_CSV, load_sampled_recipes
 
@@ -1786,6 +1804,24 @@ def _run_feasibility_pipeline(
     if progress_writer is not None:
         progress_writer.set_phase("sample_load", total=len(recipe_ingredients))
     print(f"Loaded {len(recipes)} recipes, {len(recipe_ingredients)} ingredient lines", flush=True)
+
+    if early_dequant_only:
+        from early_dequant_pass import run_early_dequant_pass
+
+        chunk_index = manifest.get("chunk_index", 0)
+        stats = run_early_dequant_pass(
+            recipe_ingredients,
+            chunk_index=int(chunk_index),
+            out_dir=write_dir,
+            dequant_cache_path=dequant_cache_path,
+        )
+        manifest["early_dequant_stats"] = stats
+        write_manifest(write_dir, manifest)
+        return {
+            "early_dequant_only": True,
+            "stats": stats,
+            "n_lines": len(recipe_ingredients),
+        }
 
     if finalize_only:
         if not paths["matches"].is_file():
@@ -1961,25 +1997,46 @@ def _run_feasibility_pipeline(
         expected_lines_per_recipe = (
             recipe_ingredients.groupby("recipe_id").size().astype(int).to_dict()
         )
-        matches_df = run_judging_cached(
-            payloads,
-            model=model,
-            concurrency=concurrency,
-            paths=paths,
-            manifest=manifest,
-            force=force_judging,
-            retry_mode=retry_mode,
-            baseline_paths=baseline_paths if retry_mode is not None else None,
-            retry_limit=retry_limit,
-            total_dataset_lines=len(recipe_ingredients),
-            expected_lines_per_recipe=expected_lines_per_recipe,
-            disk_flush_every=disk_flush_every,
-            judge_log_every=judge_log_every,
-            heartbeat_sec=heartbeat_sec,
-            progress_writer=progress_writer,
-            dequant_cache_path=None if no_dequant_cache else dequant_cache_path,
-            no_dequant_cache=no_dequant_cache,
-        )
+        if skip_judging:
+            from judge_checkpoint import load_judge_checkpoint
+
+            cache_path = paths["judge_raw"]
+            if cache_path.is_file():
+                matches_df = load_judge_checkpoint(cache_path)
+                print(
+                    f"Skipping sync judging (--skip-judging): loaded {len(matches_df)} cached rows",
+                    flush=True,
+                )
+            elif paths["matches"].is_file():
+                matches_df = pd.read_parquet(paths["matches"])
+                print(
+                    f"Skipping sync judging: loaded {len(matches_df)} rows from pipeline_matches",
+                    flush=True,
+                )
+            else:
+                raise FileNotFoundError(
+                    "skip_judging requires judge_matches_raw.parquet or pipeline_matches.parquet"
+                )
+        else:
+            matches_df = run_judging_cached(
+                payloads,
+                model=model,
+                concurrency=concurrency,
+                paths=paths,
+                manifest=manifest,
+                force=force_judging,
+                retry_mode=retry_mode,
+                baseline_paths=baseline_paths if retry_mode is not None else None,
+                retry_limit=retry_limit,
+                total_dataset_lines=len(recipe_ingredients),
+                expected_lines_per_recipe=expected_lines_per_recipe,
+                disk_flush_every=disk_flush_every,
+                judge_log_every=judge_log_every,
+                heartbeat_sec=heartbeat_sec,
+                progress_writer=progress_writer,
+                dequant_cache_path=None if no_dequant_cache else dequant_cache_path,
+                no_dequant_cache=no_dequant_cache,
+            )
         matches_df = attach_amount_fields(matches_df, amount_df)
 
         if is_openai_partial_manifest(load_manifest(write_dir)):
@@ -2045,7 +2102,7 @@ def _run_feasibility_pipeline(
             else:
                 matches_df = _apply_rules_gram_columns(matches_df)
 
-        if not skip_portion_llm:
+        if not skip_portion_llm and not batch_mode:
             already_done = (
                 "portion_resolved_by_llm" in matches_df.columns
                 and matches_df["portion_resolved_by_llm"].fillna(False).any()
@@ -2217,6 +2274,21 @@ def main() -> None:
             "(checked before pipeline phases run)"
         ),
     )
+    parser.add_argument(
+        "--batch-mode",
+        action="store_true",
+        help="Batch pipeline mode: skip sync judge/portion LLM (use v7_batch_orchestrator)",
+    )
+    parser.add_argument(
+        "--skip-judging",
+        action="store_true",
+        help="Skip sync LLM judging (use existing judge_matches_raw or batch ingest)",
+    )
+    parser.add_argument(
+        "--early-dequant-only",
+        action="store_true",
+        help="Run early dequant/generic pass only; no embeddings or LLM",
+    )
     parser.add_argument("--no-mlflow", action="store_true", help="Skip MLflow logging")
     parser.add_argument(
         "--mlflow-experiment",
@@ -2262,6 +2334,9 @@ def main() -> None:
         dequant_cache_path=args.dequant_cache,
         no_dequant_cache=args.no_dequant_cache,
         skip_resolved_in_db=args.skip_resolved_in_db,
+        batch_mode=args.batch_mode,
+        skip_judging=args.skip_judging or args.batch_mode,
+        early_dequant_only=args.early_dequant_only,
     )
 
 

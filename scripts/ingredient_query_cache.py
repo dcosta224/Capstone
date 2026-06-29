@@ -458,9 +458,23 @@ def load_or_build_recipe_artifacts(
     batch_size: int = 256,
     force: bool = False,
     show_progress: bool = True,
+    quiet: bool = False,
+    only_keys: set[tuple[int, int]] | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     work_dir = Path(work_dir or DEFAULT_WORK_DIR)
-    n_expected = len(recipe_ingredients)
+    ingredients = recipe_ingredients
+    if only_keys is not None:
+        mask = ingredients.apply(
+            lambda r: (int(r["recipe_id"]), int(r["ingredient_idx"])) in only_keys,
+            axis=1,
+        )
+        ingredients = ingredients.loc[mask].reset_index(drop=True)
+        if ingredients.empty:
+            empty = pd.DataFrame(columns=["recipe_id", "ingredient_idx", "ingredient"])
+            z = np.zeros((0, 384), dtype=np.float32)
+            meta = {"n_rows": 0, "semantic_embedding_version": RECIPE_SEMANTIC_EMBEDDING_VERSION}
+            return empty, z, z, z, meta
+    n_expected = len(ingredients)
 
     recipe_paths = _recipe_paths(work_dir)
     unprepared_path = work_dir / UNPREPARED_PREP_EMB
@@ -472,22 +486,25 @@ def load_or_build_recipe_artifacts(
             and len(parsed) == n_expected
             and meta.get("semantic_embedding_version") == RECIPE_SEMANTIC_EMBEDDING_VERSION
         ):
-            print(f"Loaded cached recipe parse + embeddings ({n_expected:,} rows) → {work_dir}")
+            if not quiet:
+                print(f"Loaded cached recipe parse + embeddings ({n_expected:,} rows) → {work_dir}")
             return parsed, name_emb, prep_emb, dequant_emb, meta
         if meta.get("semantic_embedding_version") != RECIPE_SEMANTIC_EMBEDDING_VERSION:
-            print(
-                f"Recipe embedding cache stale "
-                f"({meta.get('semantic_embedding_version')!r} != {RECIPE_SEMANTIC_EMBEDDING_VERSION!r}); rebuilding…",
-                flush=True,
-            )
+            if not quiet:
+                print(
+                    f"Recipe embedding cache stale "
+                    f"({meta.get('semantic_embedding_version')!r} != {RECIPE_SEMANTIC_EMBEDDING_VERSION!r}); rebuilding…",
+                    flush=True,
+                )
 
-    print(f"Building recipe parse + 3× embeddings ({n_expected:,} rows) → {work_dir}")
+    if not quiet:
+        print(f"Building recipe parse + 3× embeddings ({n_expected:,} rows) → {work_dir}")
     parsed, name_emb, prep_emb, dequant_emb, meta_bit = build_recipe_artifacts(
-        recipe_ingredients,
+        ingredients,
         work_dir,
         model_name=model_name,
         batch_size=batch_size,
-        show_progress=show_progress,
+        show_progress=show_progress and not quiet,
     )
     full_meta = _read_meta(work_dir)
     full_meta["model_name"] = model_name

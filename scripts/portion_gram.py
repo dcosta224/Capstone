@@ -16,6 +16,7 @@ from amount_kind import (
     classify_amount_kind,
     classify_from_parsed_row,
     infer_count_query,
+    is_micro_volume_unit,
     missing_quantity,
     normalize_count_unit,
     _normalize_parsed_unit,
@@ -789,6 +790,8 @@ def pick_best_portion(
     recipe_unit: str,
 ) -> PortionCandidate | None:
     if not candidates:
+        return None
+    if is_micro_volume_unit(recipe_unit):
         return None
     recipe_norm = normalize_volume_unit(recipe_unit)
     readable = [c for c in candidates if not c.fndds_code_only or c.has_readable_text]

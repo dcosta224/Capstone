@@ -91,6 +91,7 @@ def iter_progress(
     leave: bool = True,
     position: int | None = None,
     unit: str | None = None,
+    force: bool = False,
 ) -> Iterator[T]:
     if not enabled:
         yield from iterable
@@ -100,16 +101,16 @@ def iter_progress(
         yield from iterable
         return
     try:
-        yield from tqdm(
-            iterable,
-            **_tqdm_kwargs(
-                total=total,
-                desc=desc,
-                leave=leave,
-                position=position,
-                unit=unit,
-            ),
+        kw = _tqdm_kwargs(
+            total=total,
+            desc=desc,
+            leave=leave,
+            position=position,
+            unit=unit,
         )
+        if force:
+            kw["disable"] = False
+        yield from tqdm(iterable, **kw)
     except Exception:
         yield from iterable
 

@@ -71,6 +71,7 @@ IRREGULAR_PLURALS = {
     "potatoes": "potato",
     "cherries": "cherry",
     "berries": "berry",
+    "sausages": "sausage",
 }
 
 

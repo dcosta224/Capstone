@@ -568,6 +568,20 @@ def retrieve_llm_candidates_portion_aware(
     )
 
 
+def _coerce_portion_id(value: Any) -> int | None:
+    """Normalize best_portion_id; pandas may store missing values as float NaN."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return int(value)
+
+
 def format_candidate_block_portion(
     prompt_candidates: pd.DataFrame,
     max_chars: int,
@@ -580,8 +594,8 @@ def format_candidate_block_portion(
         pflag = getattr(row, "portion_flag", "-")
         portions = getattr(row, "portion_summary", "-") or "-"
         fit = getattr(row, "portion_match_score", 0.0) or 0.0
-        best_pid = getattr(row, "best_portion_id", None)
-        pid_note = f" | pick_portion_id={int(best_pid)}" if best_pid is not None else ""
+        best_pid = _coerce_portion_id(getattr(row, "best_portion_id", None))
+        pid_note = f" | pick_portion_id={best_pid}" if best_pid is not None else ""
         lines.append(
             f"{row.fdc_id} | {desc} | {row.lexical_dequant:.2f} | "
             f"{row.dequant_sem:.2f} | {pflag} | portions: {portions} | fit={fit:.2f}{pid_note}"

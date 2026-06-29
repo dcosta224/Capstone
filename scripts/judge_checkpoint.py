@@ -12,6 +12,21 @@ import pandas as pd
 MERGE_KEYS = ("recipe_id", "ingredient_idx", "split_part_idx")
 
 
+def _concat_dataframes(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Concat frames without pandas concat empty/all-NA deprecation warnings."""
+    non_empty = [frame for frame in frames if frame is not None and not frame.empty]
+    if not non_empty:
+        return pd.DataFrame()
+    if len(non_empty) == 1:
+        return non_empty[0].copy()
+    records: list[dict[str, Any]] = []
+    for frame in non_empty:
+        records.extend(frame.to_dict(orient="records"))
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame.from_records(records)
+
+
 def _split_part_idx_series(df: pd.DataFrame) -> pd.Series:
     if "split_part_idx" in df.columns:
         return df["split_part_idx"].fillna(0).astype(int)
@@ -72,7 +87,7 @@ def merge_judge_checkpoint(path: Path, new_rows: list[dict[str, Any]]) -> int:
         keep = existing[
             ~existing.apply(lambda r: row_merge_key(r) in keys, axis=1)
         ]
-        merged = pd.concat([keep, incoming], ignore_index=True)
+        merged = _concat_dataframes([keep, incoming])
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     merged.to_parquet(tmp_path, index=False)
@@ -105,7 +120,7 @@ def combine_judged_checkpoint(
         parts.append(pd.DataFrame(session_rows))
     if not parts:
         return pd.DataFrame()
-    merged = pd.concat(parts, ignore_index=True)
+    merged = _concat_dataframes(parts)
     if merged.empty:
         return merged
     if "split_part_idx" not in merged.columns:
