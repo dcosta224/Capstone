@@ -19,6 +19,7 @@ class ContainsTrigger:
     keywords: tuple[str, ...]
     foodon_ancestors: tuple[str, ...]
     foodon_ancestors_exclude: tuple[str, ...] = ()
+    keyword_suppress_phrases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,9 @@ def load_diet_tags(path: Path | None = None) -> DietTagsRegistry:
             keywords=tuple(str(k).lower() for k in spec.get("keywords", [])),
             foodon_ancestors=tuple(spec.get("foodon_ancestors", [])),
             foodon_ancestors_exclude=tuple(spec.get("foodon_ancestors_exclude", [])),
+            keyword_suppress_phrases=tuple(
+                str(p).lower() for p in spec.get("keyword_suppress_phrases", [])
+            ),
         )
         for slug, spec in raw["contains"].items()
     }
@@ -73,6 +77,24 @@ def _compile_patterns(keywords: tuple[str, ...]) -> list[re.Pattern[str]]:
     return [re.compile(_WORD_BOUNDARY.format(re.escape(kw)), re.IGNORECASE) for kw in keywords]
 
 
+def contains_slugs_from_label(label: str, registry: DietTagsRegistry) -> set[str]:
+    """Match diet_tags contains keywords against a FoodOn class label (word boundaries)."""
+    normalized = label.lower().strip()
+    if not normalized or normalized in registry.universal:
+        return set()
+    hits: set[str] = set()
+    for trigger in registry.contains.values():
+        if trigger.keyword_suppress_phrases and any(
+            phrase in normalized for phrase in trigger.keyword_suppress_phrases
+        ):
+            continue
+        for pat in _compile_patterns(trigger.keywords):
+            if pat.search(normalized):
+                hits.add(trigger.slug)
+                break
+    return hits
+
+
 def detect_contains(
     description: str,
     ingredients_text: str | None,
@@ -94,6 +116,10 @@ def detect_contains(
             return
         for trigger in registry.contains.values():
             if trigger.slug in hits:
+                continue
+            if trigger.keyword_suppress_phrases and any(
+                phrase in normalized for phrase in trigger.keyword_suppress_phrases
+            ):
                 continue
             for pat in _compile_patterns(trigger.keywords):
                 m = pat.search(normalized)

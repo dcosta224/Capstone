@@ -1,0 +1,818 @@
+{
+  "foodon_false_positives_by_dimension": {
+    "alcohol": [
+      {
+        "foodon_id": "FOODON_03315563",
+        "label": "wine (spiced, fortified, extract for preparation of)",
+        "wrong_tag": "alcohol",
+        "why": "fill heuristic: label_lc.str.contains('extract|vinegar|non-alcoholic', regex=True)",
+        "source_type": "FoodOn propagation"
+      },
+      {
+        "foodon_id": "FOODON_03315585",
+        "label": "spirits (extract of)",
+        "wrong_tag": "alcohol",
+        "why": "fill heuristic: label_lc.str.contains('extract|vinegar|non-alcoholic', regex=True)",
+        "source_type": "FoodOn propagation"
+      }
+    ],
+    "dairy": [],
+    "egg": [
+      {
+        "foodon_id": "FOODON_00001104",
+        "label": "sea water fish egg food product",
+        "wrong_tag": "egg",
+        "why": "example tagged node (verify manually)",
+        "source_type": "FoodOn propagation"
+      }
+    ],
+    "fish": [
+      {
+        "foodon_id": "FOODON_00001054",
+        "label": "fermented fish or seafood food product",
+        "wrong_tag": "fish",
+        "why": "example tagged node (verify manually)",
+        "source_type": "FoodOn propagation"
+      }
+    ],
+    "honey": [
+      {
+        "foodon_id": "FOODON_00001178",
+        "label": "honey food product",
+        "wrong_tag": "honey",
+        "why": "example tagged node (verify manually)",
+        "source_type": "FoodOn propagation"
+      }
+    ],
+    "peanut": [
+      {
+        "foodon_id": "FOODON_03304234",
+        "label": "coconut peanut butter log",
+        "wrong_tag": "peanut",
+        "why": "fill heuristic: label_lc.str.contains('peanut oil|peanut butter', regex=True)",
+        "source_type": "FoodOn propagation"
+      },
+      {
+        "foodon_id": "FOODON_03305637",
+        "label": "peanut butter (hydrogenated)",
+        "wrong_tag": "peanut",
+        "why": "fill heuristic: label_lc.str.contains('peanut oil|peanut butter', regex=True)",
+        "source_type": "FoodOn propagation"
+      }
+    ],
+    "pork": [
+      {
+        "foodon_id": "FOODON_00002557",
+        "label": "black pudding",
+        "wrong_tag": "pork",
+        "why": "pork tag without pork keywords in label",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00003249",
+        "label": "pancetta",
+        "wrong_tag": "pork",
+        "why": "pork tag without pork keywords in label",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00004267",
+        "label": "chistorra",
+        "wrong_tag": "pork",
+        "why": "pork tag without pork keywords in label",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_02000295",
+        "label": "porterhouse chop (raw)",
+        "wrong_tag": "pork",
+        "why": "pork tag without pork keywords in label",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "poultry": [
+      {
+        "foodon_id": "FOODON_00001728",
+        "label": "chicken soup food product",
+        "wrong_tag": "poultry",
+        "why": "broth/soup poultry (may be OK) \u2014 find non-meat",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03302730",
+        "label": "chicken noodle soup",
+        "wrong_tag": "poultry",
+        "why": "broth/soup poultry (may be OK) \u2014 find non-meat",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03303004",
+        "label": "chicken broth",
+        "wrong_tag": "poultry",
+        "why": "broth/soup poultry (may be OK) \u2014 find non-meat",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03304081",
+        "label": "chicken soup mix",
+        "wrong_tag": "poultry",
+        "why": "broth/soup poultry (may be OK) \u2014 find non-meat",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001939",
+        "label": "grouse meat food product",
+        "wrong_tag": "poultry",
+        "why": "poultry tag without obvious poultry in label",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "red_meat": [
+      {
+        "foodon_id": "FOODON_03302088",
+        "label": "beef extract",
+        "wrong_tag": "red_meat",
+        "why": "flavor/broth red_meat propagation",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03302091",
+        "label": "beef broth",
+        "wrong_tag": "red_meat",
+        "why": "flavor/broth red_meat propagation",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03311504",
+        "label": "beef flavor",
+        "wrong_tag": "red_meat",
+        "why": "flavor/broth red_meat propagation",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001041",
+        "label": "cow food product",
+        "wrong_tag": "red_meat",
+        "why": "red_meat without obvious red meat label",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "root_vegetable": [
+      {
+        "foodon_id": "FOODON_00003698",
+        "label": "horseradish root",
+        "wrong_tag": "root_vegetable",
+        "why": "spice roots tagged root_vegetable",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03301199",
+        "label": "horseradish root (raw)",
+        "wrong_tag": "root_vegetable",
+        "why": "spice roots tagged root_vegetable",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03304600",
+        "label": "horseradish (powdered)",
+        "wrong_tag": "root_vegetable",
+        "why": "spice roots tagged root_vegetable",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03305494",
+        "label": "horseradish (prepared)",
+        "wrong_tag": "root_vegetable",
+        "why": "spice roots tagged root_vegetable",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001148",
+        "label": "potato food product",
+        "wrong_tag": "root_vegetable",
+        "why": "reference root veg",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "sesame": [
+      {
+        "foodon_id": "FOODON_00002232",
+        "label": "sesame food product",
+        "wrong_tag": "sesame",
+        "why": "sesame tagged samples",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00004525",
+        "label": "sesame butter",
+        "wrong_tag": "sesame",
+        "why": "sesame tagged samples",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00004578",
+        "label": "sesame seed (raw)",
+        "wrong_tag": "sesame",
+        "why": "sesame tagged samples",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00004782",
+        "label": "black sesame seed",
+        "wrong_tag": "sesame",
+        "why": "sesame tagged samples",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "shellfish": [
+      {
+        "foodon_id": "FOODON_00001293",
+        "label": "shellfish food product",
+        "wrong_tag": "shellfish",
+        "why": "shellfish tag on vague shell terms",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001792",
+        "label": "crustacean food product",
+        "wrong_tag": "shellfish",
+        "why": "shellfish tag on vague shell terms",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03301088",
+        "label": "crustacean (raw)",
+        "wrong_tag": "shellfish",
+        "why": "shellfish tag on vague shell terms",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_03305575",
+        "label": "shellfish (canned)",
+        "wrong_tag": "shellfish",
+        "why": "shellfish tag on vague shell terms",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "soy": [
+      {
+        "foodon_id": "FOODON_00001050",
+        "label": "tempeh food product",
+        "wrong_tag": "soy",
+        "why": "reference: soy tagged (sample)",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001070",
+        "label": "miso food product",
+        "wrong_tag": "soy",
+        "why": "reference: soy tagged (sample)",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001078",
+        "label": "fermented soybean food product",
+        "wrong_tag": "soy",
+        "why": "reference: soy tagged (sample)",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001235",
+        "label": "soy sauce food product",
+        "wrong_tag": "soy",
+        "why": "reference: soy tagged (sample)",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001330",
+        "label": "tuaw jaew",
+        "wrong_tag": "soy",
+        "why": "soy tag without soy in label",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "tree_nut": [
+      {
+        "foodon_id": "FOODON_00001748",
+        "label": "coconut beverage",
+        "wrong_tag": "tree_nut",
+        "why": "not a tree nut but under nut food product",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00003213",
+        "label": "coconut oil (hydrogenated)",
+        "wrong_tag": "tree_nut",
+        "why": "not a tree nut but under nut food product",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00003449",
+        "label": "coconut",
+        "wrong_tag": "tree_nut",
+        "why": "not a tree nut but under nut food product",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00003856",
+        "label": "coconut meat",
+        "wrong_tag": "tree_nut",
+        "why": "not a tree nut but under nut food product",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      },
+      {
+        "foodon_id": "FOODON_00001722",
+        "label": "chestnut food product",
+        "wrong_tag": "tree_nut",
+        "why": "chestnut ambiguity",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ],
+    "wheat": [
+      {
+        "foodon_id": "FOODON_03305527",
+        "label": "wheat germ (honey-coated)",
+        "wrong_tag": "wheat",
+        "why": "non-wheat grain or wheatgrass tagged wheat",
+        "source_type": "FoodOn propagation (ancestor inheritance in foodon_contains.csv)"
+      }
+    ]
+  },
+  "keyword_detect_contains_samples": [
+    {
+      "case": "pepper universal vs black pepper",
+      "description": "black pepper",
+      "hits": {}
+    },
+    {
+      "case": "pepper universal vs black pepper",
+      "description": "bell pepper",
+      "hits": {}
+    },
+    {
+      "case": "pepper universal vs black pepper",
+      "description": "pepper",
+      "hits": {}
+    },
+    {
+      "case": "butter in peanut butter",
+      "description": "peanut butter",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "butter"
+        },
+        "peanut": {
+          "source": "description",
+          "matched_term": "peanut"
+        }
+      }
+    },
+    {
+      "case": "butter in peanut butter",
+      "description": "peanut butter sandwich",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "butter"
+        },
+        "peanut": {
+          "source": "description",
+          "matched_term": "peanut"
+        }
+      }
+    },
+    {
+      "case": "butter dairy",
+      "description": "butter",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "butter"
+        }
+      }
+    },
+    {
+      "case": "ham in hamburger",
+      "description": "hamburger",
+      "hits": {}
+    },
+    {
+      "case": "ham in chatham",
+      "description": "chatham",
+      "hits": {}
+    },
+    {
+      "case": "ham real",
+      "description": "ham sandwich",
+      "hits": {
+        "red_meat": {
+          "source": "description",
+          "matched_term": "ham"
+        },
+        "pork": {
+          "source": "description",
+          "matched_term": "ham"
+        }
+      }
+    },
+    {
+      "case": "cream unrelated",
+      "description": "ice cream",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "cream"
+        }
+      }
+    },
+    {
+      "case": "cream unrelated",
+      "description": "cream of mushroom soup",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "cream"
+        }
+      }
+    },
+    {
+      "case": "cream unrelated",
+      "description": "sunscreen cream",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "cream"
+        }
+      }
+    },
+    {
+      "case": "cream unrelated",
+      "description": "cream cheese",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "cheese"
+        }
+      }
+    },
+    {
+      "case": "nut in doughnut",
+      "description": "doughnut",
+      "hits": {}
+    },
+    {
+      "case": "nut in doughnut",
+      "description": "donut glazed",
+      "hits": {}
+    },
+    {
+      "case": "nut real",
+      "description": "walnut",
+      "hits": {
+        "tree_nut": {
+          "source": "description",
+          "matched_term": "walnut"
+        }
+      }
+    },
+    {
+      "case": "eggplant",
+      "description": "eggplant parmesan",
+      "hits": {
+        "dairy": {
+          "source": "description",
+          "matched_term": "parmesan"
+        }
+      }
+    },
+    {
+      "case": "wine vinegar",
+      "description": "red wine vinegar",
+      "hits": {
+        "alcohol": {
+          "source": "description",
+          "matched_term": "wine"
+        }
+      }
+    },
+    {
+      "case": "soy in soy sauce",
+      "description": "soy sauce",
+      "hits": {
+        "soy": {
+          "source": "description",
+          "matched_term": "soy"
+        }
+      }
+    },
+    {
+      "case": "chicken broth",
+      "description": "chicken broth low sodium",
+      "hits": {
+        "poultry": {
+          "source": "description",
+          "matched_term": "chicken"
+        }
+      }
+    }
+  ],
+  "ingredient_tag_review_samples": {
+    "cache_only_adds": [
+      {
+        "fdc_id": 1106772,
+        "description": "ALMOND DREAM, NON-DAIRY FROZEN DESSERT, VANILLA, VANILLA",
+        "foodon_id": "FOODON_03304972",
+        "foodon_label": "frozen dairy dessert (nutritively and nonnutritively sweetened)",
+        "confidence": 0.85,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "dairy",
+        "slug": "dairy"
+      },
+      {
+        "fdc_id": 1106986,
+        "description": "ALMOND DREAM, NON-DAIRY DESSERT, STRAWBERRY, STRAWBERRY",
+        "foodon_id": "FOODON_03304972",
+        "foodon_label": "frozen dairy dessert (nutritively and nonnutritively sweetened)",
+        "confidence": 0.85,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "dairy",
+        "slug": "dairy"
+      },
+      {
+        "fdc_id": 1107041,
+        "description": "VANILLA INSTANT PUDDING & PIE FILLING, VANILLA",
+        "foodon_id": "FOODON_03307096",
+        "foodon_label": "vanilla pudding mix",
+        "confidence": 0.85,
+        "bucket": "cache_only",
+        "cache_only_adds": "dairy",
+        "slug": "dairy"
+      },
+      {
+        "fdc_id": 1106663,
+        "description": "CHOCOLATE PUDDING & PIE FILLING, CHOCOLATE",
+        "foodon_id": "FOODON_03301660",
+        "foodon_label": "pudding",
+        "confidence": 0.9,
+        "bucket": "cache_only",
+        "cache_only_adds": "dairy",
+        "slug": "dairy"
+      },
+      {
+        "fdc_id": 1106832,
+        "description": "LEMON PEPPER NATURAL CATCH GRILLED FILLETS, LEMON PEPPER",
+        "foodon_id": "FOODON_03309527",
+        "foodon_label": "herring fillet in lemon-flavored sauce",
+        "confidence": 0.6,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "fish",
+        "slug": "fish"
+      },
+      {
+        "fdc_id": 1106153,
+        "description": "GORTON'S, CAJUN GRILLED FILLETS",
+        "foodon_id": "FOODON_03309065",
+        "foodon_label": "fish fillet (breaded)",
+        "confidence": 0.85,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "fish",
+        "slug": "fish"
+      },
+      {
+        "fdc_id": 1107229,
+        "description": "VODKA LUMPFISH CAVIAR",
+        "foodon_id": "FOODON_03317223",
+        "foodon_label": "lumpfish roe (chilled)",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "fish",
+        "slug": "fish"
+      },
+      {
+        "fdc_id": 1106196,
+        "description": "BLUEBERRY FLAVORED OVEN ROASTED ALMONDS, BLUEBERRY",
+        "foodon_id": "FOODON_03311210",
+        "foodon_label": "almond (dry, roasted)",
+        "confidence": 0.85,
+        "bucket": "cache_only",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1106251,
+        "description": "ORGANIC RAW COCONUT BUTTER, COCONUT, COCONUT",
+        "foodon_id": "FOODON_03303085",
+        "foodon_label": "coconut (raw)",
+        "confidence": 0.85,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1106584,
+        "description": "RAW COCONUT BUTTER, WHOLE COCONUT PUREE, COCONUT, COCONUT",
+        "foodon_id": "FOODON_03303085",
+        "foodon_label": "coconut (raw)",
+        "confidence": 0.85,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1106120,
+        "description": "FUDGE PEANUT BUTTER FILLED COOKIES, FUDGE PEANUT BUTTER",
+        "foodon_id": "FOODON_03302438",
+        "foodon_label": "nut butter",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1106578,
+        "description": "DARK CHOCOLATE, COCONUT",
+        "foodon_id": "FOODON_00003449",
+        "foodon_label": "coconut",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1106839,
+        "description": "BANANA DIPPERS WITH ALMONDS",
+        "foodon_id": "FOODON_00003523",
+        "foodon_label": "almond",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1106963,
+        "description": "ORGANIC COCONUT CREAM, SPECULOOS COOKIE BUTTER, SPECULOOS COOKIE BUTTER",
+        "foodon_id": "FOODON_03303088",
+        "foodon_label": "coconut cream",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1107025,
+        "description": "OLD FASHIONED COCONUT CUSTARD PIE, COCONUT CUSTARD",
+        "foodon_id": "FOODON_00003449",
+        "foodon_label": "coconut",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "tree_nut",
+        "slug": "tree_nut"
+      },
+      {
+        "fdc_id": 1107076,
+        "description": "TENDER STRIPS CRUNCHY COATING FRIED CLAMS, TENDER",
+        "foodon_id": "FOODON_03307961",
+        "foodon_label": "clam strip (breaded, fried)",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "shellfish",
+        "slug": "shellfish"
+      },
+      {
+        "fdc_id": 1107086,
+        "description": "JUMBO CRINKLE CUT FRENCH FRIES",
+        "foodon_id": "FOODON_03307041",
+        "foodon_label": "potato (crinkle-cut style, bagged)",
+        "confidence": 0.85,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "root_vegetable",
+        "slug": "root_vegetable"
+      },
+      {
+        "fdc_id": 1106242,
+        "description": "SHOESTRING FRIES FRENCH FRIED POTATOES",
+        "foodon_id": "FOODON_03301959",
+        "foodon_label": "potato (french-fried)",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "root_vegetable",
+        "slug": "root_vegetable"
+      },
+      {
+        "fdc_id": 1107087,
+        "description": "FAMOUS SEASONED FRIES, CRISPY FRENCH FRIED SEASONED POTATOES, CRISPY FRENCH FRIED",
+        "foodon_id": "FOODON_03301959",
+        "foodon_label": "potato (french-fried)",
+        "confidence": 0.9,
+        "bucket": "both_plus_cache",
+        "cache_only_adds": "root_vegetable",
+        "slug": "root_vegetable"
+      },
+      {
+        "fdc_id": 1107147,
+        "description": "IDAHO RUSSET POTATOES",
+        "foodon_id": "FOODON_00003716",
+        "foodon_label": "idaho russet potato",
+        "confidence": 0.95,
+        "bucket": "cache_only",
+        "cache_only_adds": "root_vegetable",
+        "slug": "root_vegetable"
+      }
+    ],
+    "keyword_only_adds": []
+  },
+  "mapping_disagreements_low_confidence": [
+    {
+      "fdc_id": 1106752,
+      "description": "ROMAN EGG BISCUITS COFFEE TREATS COOKIES, ROMAN EGG",
+      "foodon_id": "FOODON_03303145",
+      "foodon_label": "lincoln biscuit cookie",
+      "confidence": 0.56,
+      "bucket": "keyword_only",
+      "keyword_contains": "egg,soy,wheat",
+      "cache_contains": "egg,soy,wheat",
+      "cache_only_adds": NaN,
+      "keyword_only_adds": NaN,
+      "source_type": "bad partner mapping (low-confidence FoodOn link + contains mismatch)"
+    },
+    {
+      "fdc_id": 1106489,
+      "description": "LOW SODIUM FRADIAVOLO ALL NATURAL SAUCE, LOW SODIUM FRADIAVOLO",
+      "foodon_id": "FOODON_03317091",
+      "foodon_label": "sauce powder",
+      "confidence": 0.6,
+      "bucket": "keyword_only",
+      "keyword_contains": "root_vegetable",
+      "cache_contains": "root_vegetable",
+      "cache_only_adds": NaN,
+      "keyword_only_adds": NaN,
+      "source_type": "bad partner mapping (low-confidence FoodOn link + contains mismatch)"
+    },
+    {
+      "fdc_id": 1106806,
+      "description": "ROMANO GOURMET CUT CROUTONS, ROMANO",
+      "foodon_id": "FOODON_00004344",
+      "foodon_label": "romano cheese food product",
+      "confidence": 0.6,
+      "bucket": "keyword_only",
+      "keyword_contains": "dairy,root_vegetable,wheat",
+      "cache_contains": "dairy,root_vegetable,wheat",
+      "cache_only_adds": NaN,
+      "keyword_only_adds": NaN,
+      "source_type": "bad partner mapping (low-confidence FoodOn link + contains mismatch)"
+    },
+    {
+      "fdc_id": 1106832,
+      "description": "LEMON PEPPER NATURAL CATCH GRILLED FILLETS, LEMON PEPPER",
+      "foodon_id": "FOODON_03309527",
+      "foodon_label": "herring fillet in lemon-flavored sauce",
+      "confidence": 0.6,
+      "bucket": "both_plus_cache",
+      "keyword_contains": "dairy,root_vegetable",
+      "cache_contains": "dairy,fish,root_vegetable",
+      "cache_only_adds": "fish",
+      "keyword_only_adds": NaN,
+      "source_type": "bad partner mapping (low-confidence FoodOn link + contains mismatch)"
+    },
+    {
+      "fdc_id": 1107198,
+      "description": "SPINACH ARTICHOKE & PARMESAN DIP, SPINACH ARTICHOKE & PARMESAN",
+      "foodon_id": "FOODON_00001617",
+      "foodon_label": "artichoke vegetable food product",
+      "confidence": 0.614,
+      "bucket": "keyword_only",
+      "keyword_contains": "dairy,egg,root_vegetable",
+      "cache_contains": "dairy,egg,root_vegetable",
+      "cache_only_adds": NaN,
+      "keyword_only_adds": NaN,
+      "source_type": "bad partner mapping (low-confidence FoodOn link + contains mismatch)"
+    },
+    {
+      "fdc_id": 1106461,
+      "description": "VIDALIA ONION BEEF PATTIES, VIDALIA ONION",
+      "foodon_id": "FOODON_03307777",
+      "foodon_label": "sausage sandwich",
+      "confidence": 0.62,
+      "bucket": "keyword_only",
+      "keyword_contains": "red_meat,root_vegetable,soy,wheat",
+      "cache_contains": "red_meat,root_vegetable,soy,wheat",
+      "cache_only_adds": NaN,
+      "keyword_only_adds": NaN,
+      "source_type": "bad partner mapping (low-confidence FoodOn link + contains mismatch)"
+    },
+    {
+      "fdc_id": 1107220,
+      "description": "TEXMATI, LT. BROWN RICE, CHIA & ORZO",
+      "foodon_id": "FOODON_00002867",
+      "foodon_label": "mexican rice (dish)",
+      "confidence": 0.62,
+      "bucket": "keyword_only",
+      "keyword_contains": "wheat",
+      "cache_contains": "wheat",
+      "cache_only_adds": NaN,
+      "keyword_only_adds": NaN,
+      "source_type": "bad partner mapping (low-confidence FoodOn link + contains mismatch)"
+    }
+  ]
+}

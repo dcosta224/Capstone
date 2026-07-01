@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "foodon_web"))
 
 from foodon_contains_core import build_contains_lookup, lookup_contains
+from diet_tags_core import contains_slugs_from_label, load_diet_tags
 
 
 class _MiniIndex:
@@ -88,5 +89,79 @@ def test_tree_nut_excludes_peanut(monkeypatch):
 
     df, _ = build_contains_lookup(index, foodon_only=True)
     assert lookup_contains("FOODON_ALMOND", df) == {"tree_nut"}
+    assert lookup_contains("FOODON_RAW", df) == {"peanut"}
+    assert "tree_nut" not in lookup_contains("FOODON_RAW", df)
+
+
+def test_label_keyword_tags_chicken_stew_without_ancestor(monkeypatch):
+    from diet_tags_core import ContainsTrigger, DietTagsRegistry
+
+    fake_registry = DietTagsRegistry(
+        universal=frozenset(),
+        contains={
+            "poultry": ContainsTrigger(
+                "poultry",
+                ("chicken", "turkey", "duck", "poultry"),
+                (),
+            ),
+        },
+        nutrients={},
+        ingredient_tags={},
+        recipe_tags={},
+    )
+    monkeypatch.setattr("foodon_contains_core.load_diet_tags", lambda path=None: fake_registry)
+
+    index = _MiniIndex()
+    index.labels["FOODON_STEW"] = "chicken stew or hash"
+    index.children["FOODON_STEW"] = []
+
+    df, summary = build_contains_lookup(index, foodon_only=True)
+    assert lookup_contains("FOODON_STEW", df) == {"poultry"}
+    assert summary["label_keyword_additions"]["poultry"] == 1
+
+
+def test_peanut_butter_not_dairy_from_label():
+    registry = load_diet_tags()
+    assert contains_slugs_from_label("peanut butter", registry) == {"peanut"}
+    assert "dairy" not in contains_slugs_from_label("peanut butter food product", registry)
+
+
+def test_label_keywords_respect_ancestor_exclude(monkeypatch):
+    from diet_tags_core import ContainsTrigger, DietTagsRegistry
+
+    fake_registry = DietTagsRegistry(
+        universal=frozenset(),
+        contains={
+            "tree_nut": ContainsTrigger(
+                "tree_nut",
+                ("almond", "walnut"),
+                ("FOODON_NUT",),
+                ("FOODON_PEANUT",),
+            ),
+            "peanut": ContainsTrigger("peanut", ("peanut",), ("FOODON_PEANUT",)),
+        },
+        nutrients={},
+        ingredient_tags={},
+        recipe_tags={},
+    )
+    monkeypatch.setattr("foodon_contains_core.load_diet_tags", lambda path=None: fake_registry)
+
+    index = _MiniIndex()
+    index.labels.update(
+        {
+            "FOODON_NUT": "nut food product",
+            "FOODON_PEANUT": "peanut spread",
+            "FOODON_RAW": "raw peanut",
+        }
+    )
+    index.children.update(
+        {
+            "FOODON_NUT": ["FOODON_PEANUT"],
+            "FOODON_PEANUT": ["FOODON_RAW"],
+            "FOODON_RAW": [],
+        }
+    )
+
+    df, _ = build_contains_lookup(index, foodon_only=True)
     assert lookup_contains("FOODON_RAW", df) == {"peanut"}
     assert "tree_nut" not in lookup_contains("FOODON_RAW", df)

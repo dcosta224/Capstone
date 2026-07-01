@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from diet_tags_core import load_diet_tags
+from diet_tags_core import contains_slugs_from_label, load_diet_tags
 from foodon_paths import FOODON_CONTAINS_CSV, FOODON_CONTAINS_PARQUET, FOODON_CONTAINS_SUMMARY
 
 DEFAULT_OVERRIDES_PATH = Path(__file__).resolve().parents[1] / "data" / "foodon_contains_overrides.json"
@@ -40,22 +40,17 @@ def _load_overrides(path: Path | None) -> tuple[dict[str, list[str]], dict[str, 
     return force, clear
 
 
-def build_contains_lookup(
+def _ancestor_slug_hits(
     foodon_index: Any,
-    *,
-    overrides_path: Path | None = None,
-    foodon_only: bool = True,
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """
-    Return wide DataFrame: foodon_id, label, contains_<slug> booleans for each diet_tags contains key.
-    """
-    registry = load_diet_tags()
+    registry: Any,
+) -> tuple[dict[str, set[str]], dict[str, set[str]], list[dict[str, Any]]]:
+    """Propagate contains from foodon_ancestors; return hits, per-slug exclude sets, metadata."""
     contains_slugs = sorted(registry.contains.keys())
     children = foodon_index.children
-
-    # Precompute descendant sets per (slug, ancestor_id).
     slug_hits: dict[str, set[str]] = {slug: set() for slug in contains_slugs}
+    slug_excluded: dict[str, set[str]] = {slug: set() for slug in contains_slugs}
     ancestor_meta: list[dict[str, Any]] = []
+
     for slug, trigger in registry.contains.items():
         for anc_id in trigger.foodon_ancestors:
             if anc_id not in foodon_index.labels:
@@ -86,6 +81,7 @@ def build_contains_lookup(
                 continue
             exc = _descendants_of(exc_id, children)
             slug_hits[slug] -= exc
+            slug_excluded[slug] |= exc
             ancestor_meta.append(
                 {
                     "contains_slug": slug,
@@ -95,6 +91,57 @@ def build_contains_lookup(
                     "status": "exclude",
                 }
             )
+
+    return slug_hits, slug_excluded, ancestor_meta
+
+
+def _apply_label_keywords(
+    foodon_index: Any,
+    registry: Any,
+    node_ids: list[str],
+    slug_hits: dict[str, set[str]],
+    slug_excluded: dict[str, set[str]],
+) -> dict[str, int]:
+    """Union label keyword hits into slug_hits; respect ancestor_exclude subtrees."""
+    added_per_slug: dict[str, int] = {slug: 0 for slug in slug_hits}
+    for node_id in node_ids:
+        label = foodon_index.labels.get(node_id, "")
+        for slug in contains_slugs_from_label(label, registry):
+            if node_id in slug_excluded.get(slug, set()):
+                continue
+            if node_id in slug_hits[slug]:
+                continue
+            slug_hits[slug].add(node_id)
+            added_per_slug[slug] += 1
+    return added_per_slug
+
+
+def build_contains_lookup(
+    foodon_index: Any,
+    *,
+    overrides_path: Path | None = None,
+    foodon_only: bool = True,
+    use_label_keywords: bool = True,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Return wide DataFrame: foodon_id, label, contains_<slug> booleans for each diet_tags contains key.
+
+    Tagging = ancestor subtree propagation ∪ FoodOn label keyword match − overrides.
+    """
+    registry = load_diet_tags()
+    contains_slugs = sorted(registry.contains.keys())
+
+    slug_hits, slug_excluded, ancestor_meta = _ancestor_slug_hits(foodon_index, registry)
+    ancestor_only_counts = {slug: len(slug_hits[slug]) for slug in contains_slugs}
+
+    label_keyword_additions: dict[str, int] = {slug: 0 for slug in contains_slugs}
+    if use_label_keywords:
+        node_ids_preview = sorted(foodon_index.labels.keys())
+        if foodon_only:
+            node_ids_preview = [nid for nid in node_ids_preview if str(nid).startswith("FOODON_")]
+        label_keyword_additions = _apply_label_keywords(
+            foodon_index, registry, node_ids_preview, slug_hits, slug_excluded
+        )
 
     force, clear = _load_overrides(overrides_path)
 
@@ -123,6 +170,9 @@ def build_contains_lookup(
         "tagged_counts": {
             slug: int(df[f"contains_{slug}"].sum()) for slug in contains_slugs if f"contains_{slug}" in df.columns
         },
+        "ancestor_only_counts": ancestor_only_counts,
+        "label_keyword_additions": label_keyword_additions,
+        "use_label_keywords": use_label_keywords,
         "ancestor_roots": ancestor_meta,
         "overrides_path": str(overrides_path or DEFAULT_OVERRIDES_PATH),
         "overrides_applied": {"force": len(force), "clear": len(clear)},

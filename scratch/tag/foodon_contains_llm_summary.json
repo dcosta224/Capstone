@@ -1,0 +1,12 @@
+{
+  "candidates": 1923,
+  "judged": 1843,
+  "review_rows": 1923,
+  "with_llm_additions": 641,
+  "with_ontology_confirmed": 311,
+  "llm_model": "qwen/qwen3.6-35b-a3b",
+  "llm_url": "http://10.0.0.2:1234/v1",
+  "min_confidence": 0.65,
+  "min_ontology_score": 0.55,
+  "elapsed_s": 1451.6
+}
