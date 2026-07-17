@@ -3,6 +3,8 @@
 Local dev on your Mac; S3 for durable files; optional on-demand EC2 for staging demos.
 Supabase stays your shared database.
 
+**Container path (GitHub → ECR → EC2):** see **[ECR_EC2_DEPLOY.md](ECR_EC2_DEPLOY.md)** for the full write-up of automated image push and Docker-on-EC2 hosting.
+
 ## Cost cheat sheet
 
 | Action | EC2 runs? | Typical cost |
