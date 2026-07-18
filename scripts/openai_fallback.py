@@ -51,18 +51,111 @@ def reset_openai_key_state() -> None:
 
 
 def get_openai_api_keys() -> list[str]:
-    """Return distinct OpenAI API keys from env (primary then fallback)."""
+    """Return distinct OpenAI API keys from env (primary then fallbacks)."""
     load_dotenv()
     keys: list[str] = []
-    for name in ("OPENAI_API_KEY", "OPENAI_API_KEY_2"):
+    for name in ("OPENAI_API_KEY", "OPENAI_API_KEY_2", "OPENAI_API_KEY_3"):
         value = os.environ.get(name, "").strip()
         if value and value not in keys:
             keys.append(value)
     if not keys:
         raise RuntimeError(
-            "No OpenAI API key configured. Set OPENAI_API_KEY (and optionally OPENAI_API_KEY_2) in .env"
+            "No OpenAI API key configured. Set OPENAI_API_KEY "
+            "(and optionally OPENAI_API_KEY_2, OPENAI_API_KEY_3) in .env"
         )
     return keys
+
+
+def get_foodon_openai_api_key() -> str:
+    """Dedicated OpenAI key for FoodOn batch runs (separate org quota)."""
+    load_dotenv()
+    for name in ("OPENAI_API_KEY_FOODON", "OPENAI_API_KEY_3"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    raise RuntimeError(
+        "No FoodOn OpenAI key configured. Set OPENAI_API_KEY_FOODON or OPENAI_API_KEY_3 in .env"
+    )
+
+
+BATCH_KEY_ENV_NAMES: tuple[str, ...] = (
+    "OPENAI_API_KEY",
+    "OPENAI_API_KEY_2",
+    "OPENAI_API_KEY_3",
+    "OPENAI_API_KEY_FOODON",
+)
+
+
+def load_named_openai_keys() -> dict[str, str]:
+    """Return env-name -> API key for all configured batch keys."""
+    load_dotenv()
+    out: dict[str, str] = {}
+    for name in BATCH_KEY_ENV_NAMES:
+        value = os.environ.get(name, "").strip()
+        if value:
+            out[name] = value
+    return out
+
+
+def batch_api_key_chain(*prefer_env_names: str) -> list[tuple[str, str]]:
+    """Ordered (env_name, key) pairs for batch submit/poll, preferring listed env vars first."""
+    named = load_named_openai_keys()
+    chain: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name in prefer_env_names:
+        value = named.get(name)
+        if value and value not in seen:
+            chain.append((name, value))
+            seen.add(value)
+    for name in BATCH_KEY_ENV_NAMES:
+        value = named.get(name)
+        if value and value not in seen:
+            chain.append((name, value))
+            seen.add(value)
+    if not chain:
+        raise RuntimeError(
+            "No OpenAI API key configured. Set OPENAI_API_KEY "
+            "(and optionally OPENAI_API_KEY_2, OPENAI_API_KEY_3, OPENAI_API_KEY_FOODON) in .env"
+        )
+    return chain
+
+
+def foodon_batch_api_key_chain() -> list[tuple[str, str]]:
+    """FoodOn batches prefer the dedicated org, then fall back to other keys."""
+    return batch_api_key_chain("OPENAI_API_KEY_FOODON", "OPENAI_API_KEY_3")
+
+
+def v7_batch_api_key_chain() -> list[tuple[str, str]]:
+    """V7 batches prefer the primary org, then fall back to other keys."""
+    return batch_api_key_chain("OPENAI_API_KEY", "OPENAI_API_KEY_2", "OPENAI_API_KEY_3")
+
+
+def api_key_for_batch_record(
+    batch_rec: dict[str, Any],
+    chain: list[tuple[str, str]],
+) -> str:
+    """Resolve the API key that owns a batch (for poll/ingest/download)."""
+    from openai_batch_client import retrieve_batch
+
+    named = load_named_openai_keys()
+    env = batch_rec.get("openai_key_env")
+    if env and env in named:
+        return named[env]
+
+    bid = str(batch_rec.get("id") or "").strip()
+    if not bid:
+        raise RuntimeError("batch record has no id")
+
+    last_exc: Exception | None = None
+    for env_name, key in chain:
+        try:
+            retrieve_batch(bid, api_key=key)
+            if env_name != "explicit":
+                batch_rec["openai_key_env"] = env_name
+            return key
+        except Exception as exc:
+            last_exc = exc
+    raise RuntimeError(f"Batch {bid} not found on any configured OpenAI org") from last_exc
 
 
 def get_key_pool_status() -> dict[str, Any]:
