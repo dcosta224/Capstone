@@ -728,6 +728,84 @@ def pick_best_portion(
     return max(pool, key=lambda c: c.score_for(recipe_unit))
 
 
+def infer_matched_portion_id(
+    fdc_id: int,
+    *,
+    amount_kind: str,
+    unit: str | None = None,
+    quantity: float | None = None,
+    query_tokens: list[str] | None = None,
+    portion_index: dict[int, list[PortionCandidate]] | None = None,
+    count_portion_index: dict[int, list[CountPortionCandidate]] | None = None,
+) -> int | None:
+    """Pick best USDA portion for rules-based gram conversion."""
+    fdc_int = int(fdc_id)
+    if amount_kind == "volume" and unit and portion_index is not None:
+        candidates = portion_index.get(fdc_int, [])
+        portion = pick_best_portion(candidates, str(unit))
+        if portion is None:
+            return None
+        if quantity is not None:
+            result = _grams_from_volume_candidate(float(quantity), str(unit), portion)
+            if result is None or result.grams is None:
+                return None
+        return portion.portion_id
+    if amount_kind == "count" and count_portion_index is not None and query_tokens:
+        candidates = count_portion_index.get(fdc_int, [])
+        portion = pick_best_count_portion(candidates, list(query_tokens))
+        return portion.portion_id if portion is not None else None
+    return None
+
+
+def resolve_matched_portion_id(
+    fdc_id: int | None,
+    matched_portion_id: int | None,
+    *,
+    amount_kind: str,
+    unit: str | None = None,
+    quantity: float | None = None,
+    query_tokens: list[str] | None = None,
+    portion_index: dict[int, list[PortionCandidate]] | None = None,
+    count_portion_index: dict[int, list[CountPortionCandidate]] | None = None,
+) -> tuple[int | None, bool]:
+    """Validate judge portion pick; infer from indexes when missing or non-convertible."""
+    if fdc_id is None or amount_kind not in ("volume", "count"):
+        return matched_portion_id, False
+
+    inferred = infer_matched_portion_id(
+        int(fdc_id),
+        amount_kind=amount_kind,
+        unit=unit,
+        quantity=quantity,
+        query_tokens=query_tokens,
+        portion_index=portion_index,
+        count_portion_index=count_portion_index,
+    )
+
+    if matched_portion_id is None:
+        return inferred, inferred is not None
+
+    pid = int(matched_portion_id)
+    if amount_kind == "volume" and unit and portion_index is not None:
+        candidates = portion_index.get(int(fdc_id), [])
+        chosen = next((c for c in candidates if c.portion_id == pid), None)
+        if chosen is None:
+            return inferred, inferred is not None
+        qty = 1.0 if quantity is None else float(quantity)
+        result = _grams_from_volume_candidate(qty, str(unit), chosen)
+        if result is None or result.grams is None:
+            return inferred, inferred is not None
+        return pid, False
+
+    if amount_kind == "count" and count_portion_index is not None:
+        candidates = count_portion_index.get(int(fdc_id), [])
+        if not any(c.portion_id == pid for c in candidates):
+            return inferred, inferred is not None
+        return pid, False
+
+    return matched_portion_id, False
+
+
 def resolve_quantity_fields(line: str, *, method: str = "rules") -> dict[str, Any]:
     """Parse quantity and unit from an ingredient line."""
     if method != "rules":

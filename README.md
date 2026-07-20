@@ -162,6 +162,113 @@ Current project dependencies: `numpy`, `pandas`, `pdfplumber`, `psycopg2-binary`
 
 ---
 
+## Recipe optimization agent (partner guide)
+
+Branch: **`agent_dev`**. This is the LangGraph recipe optimizer (neighborhood + creative modes) with a web playground.
+
+Deeper design notes live in [`docs/recipe_opt_agent.md`](docs/recipe_opt_agent.md). LangSmith eval notes: [`docs/recipe_opt_agent_langsmith.md`](docs/recipe_opt_agent_langsmith.md).
+
+### 1. Checkout and install
+
+```bash
+git checkout agent_dev
+git pull
+uv sync --extra notebook --extra pipeline --extra dev
+cp .env.example .env
+```
+
+In `.env`, set at least:
+
+```bash
+OPENAI_API_KEY=sk-...          # required for live LLM steps
+# optional:
+# LANGSMITH_TRACING=true
+# LANGSMITH_API_KEY=lsv2_...
+# LANGSMITH_PROJECT=recipe-opt-agent-eval
+```
+
+Supabase/`PG_*` vars are only needed if you use `RECIPE_DATA_SOURCE=db`. Prefer **local** data (default) — quota is limited.
+
+### 2. Local recipe store (recommended)
+
+The agent reads a filtered cap40 parquet dump under `Data/recipe_local_store/cap40/` (gitignored). Get it once by either:
+
+- copying that folder from a teammate who already downloaded it, or
+- downloading from Supabase (needs `PG_*` in `.env`):
+
+```bash
+PYTHONPATH=scripts:. uv run python scripts/download_cap40_recipe_store.py
+```
+
+Then keep the default data source:
+
+```bash
+export RECIPE_DATA_SOURCE=local   # default if unset
+# export RECIPE_DATA_SOURCE=db    # only if you intentionally want Supabase
+```
+
+FoodOn caches under `foodon_web/cache/` ship with the repo after `git pull`.
+
+### 3. Web UI (primary way to use it)
+
+```bash
+PYTHONPATH=scripts:. uv run python -m recipe_opt_web --reload
+# → http://127.0.0.1:8010
+```
+
+**How to run a dish**
+
+1. Choose **Neighborhood** (classic dish) or **Creative** (free-text request).
+2. **Neighborhood:** pick a canonical dish from the searchable dropdown (e.g. Spaghetti Carbonara, Fried Rice).
+3. Set the **protein / carb / fat** calorie-fraction box (defaults are fine for a first try).
+4. Optionally tune `F_accept` / `F_max` / max iterations.
+5. Click **Run**. The UI streams:
+   - neighborhood load / start-recipe selection
+   - LangGraph steps (`diagnose` → `propose` → `decide` / auto-apply → `apply` → …)
+   - final grams, ratio loss, nutrient (box) slack, and a gpt-4o run summary button
+
+**Creative mode:** type a request like `high-protein vegetarian carbonara`, set the macro box, run. The agent drafts → grounds to FDC → same diagnose loop.
+
+More UI detail: [`recipe_opt_web/README.md`](recipe_opt_web/README.md).
+
+### 4. CLI (optional)
+
+```bash
+# Offline fixture (no OpenAI / no local store required)
+PYTHONPATH=scripts:. uv run python -m recipe_opt_agent \
+  --fixture tests/fixtures/recipe_opt/synthetic_problem.json \
+  --out scratch/recipe_opt_runs/demo.json
+
+# Live neighborhood dish (needs local store + OPENAI_API_KEY)
+PYTHONPATH=scripts:. uv run python -m recipe_opt_agent \
+  --canonical-id 443 \
+  --taste "classic carbonara" \
+  --out scratch/recipe_opt_runs/carbonara.json
+```
+
+Useful IDs once the store is loaded: `443` Spaghetti Carbonara, `193` Fried Rice (see the web dropdown for the full list).
+
+### 5. Quick sanity checks
+
+```bash
+# Agent graph unit tests (offline)
+PYTHONPATH=scripts:. uv run pytest tests/test_recipe_opt_agent_graph.py -q
+
+# Smoke eval suite (offline artifacts)
+PYTHONPATH=scripts:. uv run python tests/run_eval_suite.py
+```
+
+### 6. Common issues
+
+| Symptom | Fix |
+|---------|-----|
+| `Local recipe store missing` | Run `download_cap40_recipe_store.py` (needs DB once) |
+| Heuristic / no LLM calls | Set `OPENAI_API_KEY` in `.env` |
+| Slow first neighborhood load | Expected: FoodOn index + optional cache miss; later runs use neighborhood cache |
+| Hitting Supabase quota | Confirm `RECIPE_DATA_SOURCE=local` (or unset) |
+
+---
+
 ## Loading data
 
 ### 1. USDA (SQL + psql)
