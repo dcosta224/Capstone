@@ -11,7 +11,7 @@ ExecStartPre=-/usr/bin/docker stop capstone-mvp
 ExecStartPre=-/usr/bin/docker rm capstone-mvp
 ExecStartPre=/usr/bin/docker pull ${ECR_IMAGE_URI}
 ExecStart=/usr/bin/docker run --name capstone-mvp --rm \
-  -p 8000:8000 \
+  -p 80:8000 \
   --env-file /opt/capstone/.env \
   ${ECR_IMAGE_URI}
 ExecStop=-/usr/bin/docker stop capstone-mvp

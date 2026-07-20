@@ -21,7 +21,7 @@ Supabase remains the database. This doc covers **container build/push** and **on
   EC2 staging (e.g. MacroIQDemo)
             │  docker pull + systemd (capstone-mvp-docker)
             ▼
-  http://<public-ip>:8000
+  http://macroiq.org   (host :80 → container :8000)
 ```
 
 | Piece | What it does | Cost when idle |
@@ -133,8 +133,8 @@ Never commit `deploy/aws.env`, `.env`, or `*.pem`.
 | Disk | **~40 GB gp3** (8 GB is too small for Docker + image) |
 | Key pair | `.pem` you can SSH with; restrict file ACLs on Windows |
 | IAM role | e.g. `capstone-ec2-staging` with **`AmazonEC2ContainerRegistryPullOnly`** (or project policy via `attach_ec2_ecr_iam.sh`) |
-| Security group | **SSH 22** + **TCP 8000** (your IP and/or teammates’ IPs) |
-| Public IP | Needed for `http://<ip>:8000`; IP may change after stop/start |
+| Security group | **SSH 22** + **TCP 80** (your IP and/or teammates’ IPs) |
+| Public IP | Elastic IP recommended; then DNS `@` → EIP for `http://macroiq.org` |
 
 ### One-time: secrets on the instance
 
@@ -178,60 +178,45 @@ Open: `http://<public-ip>:8000`
 | ECR image storage (~0.6 GB) | cents/mo |
 | GitHub Actions builds | GitHub minutes only |
 
-## Custom URL (optional)
+## Custom URL — `http://macroiq.org` (no `:8000`)
 
-You do **not** need a paid domain to demo. Use a placeholder until the team decides whether to buy something like `macroiq.com`.
+Browsers use **port 80** by default. The container still listens on **8000 inside Docker**; the host maps **`80:8000`**.
 
-### Domain cost (if we buy one later)
+1. **Cloudflare DNS** — A record Name `@` → Elastic IP, **DNS only** (grey cloud).  
+2. **Security group** — inbound **TCP 80** (your/partners’ IPs). Port 8000 is optional now.  
+3. **systemd** — `infra/aws/capstone-mvp-docker.service` publishes `-p 80:8000`. Redeploy so the instance picks up the unit:
+   ```bash
+   ./scripts/deploy/deploy_ecr_to_ec2.sh --start-ec2
+   ```
+4. Open **http://macroiq.org** (and `/health`).
+
+HTTPS (`https://macroiq.org`) needs a cert later (Let’s Encrypt or Cloudflare proxy) — not required for demos.
+
+You already own **`macroiq.org`**. Prefer apex DNS + port **80** mapping (section above). Keep the options table for teammates deciding HTTPS later.
+
+### Domain cost notes
 
 | Item | Typical cost |
 |------|----------------|
-| `.com` registration (e.g. `macroiq.com`) | ~**$10–15 / year** (registrar-dependent; Route 53, Namecheap, Google Domains successor, etc.) |
-| Other TLDs (`.app`, `.dev`, …) | Often similar or slightly higher; check before buying |
-| Elastic IP (stable address for DNS) | ~**$0** while associated with a **running** instance; small hourly charge if the EIP is allocated but the instance is stopped (AWS public IPv4 / EIP rules) |
-| HTTPS via **ALB + ACM** | ACM cert is free; **ALB** often ~**$16+/mo** even when EC2 is stopped — poor fit for on/off demos |
-| HTTPS via **Let’s Encrypt** on EC2 | Free cert; no ALB; renewals need the instance up occasionally |
+| Domain (e.g. `macroiq.org` — already purchased) | ~**$10–15 / year** |
+| Elastic IP | ~**$0** while on a **running** instance; may charge if allocated while instance stopped |
+| HTTPS via **ALB + ACM** | ACM free; **ALB** often ~**$16+/mo** — poor fit for stop/start demos |
+| HTTPS via **Let’s Encrypt** on EC2 | Free; renewals need instance up occasionally |
 
-**Buying a domain alone does not host the site** — you still run EC2 (or another runtime) and point DNS at it.
+### Options overview
 
-### Options (pick one path)
-
-| Option | Example URL | Cost | Pros | Cons |
-|--------|-------------|------|------|------|
-| **A. Raw IP** (current) | `http://3.88.199.144:8000` | $0 extra | Simplest | Ugly; IP often changes after stop/start |
-| **B. Free placeholder DNS** | `http://3.88.199.144.sslip.io:8000` | $0 | No signup; shareable name | Still tied to current IP unless you use Elastic IP |
-| **C. Free subdomain** (e.g. DuckDNS) | `http://macroiq-demo.duckdns.org:8000` | $0 | Stable-looking name | Extra account; update script if IP changes |
-| **D. Paid domain + Elastic IP** | `http://demo.macroiq.com` or `https://…` | ~$12/yr + EC2 as today | Real brand URL; stable with EIP | Must register available name; HTTPS needs extra setup |
-| **E. Paid domain + ALB + ACM** | `https://macroiq.com` | Domain + ALB monthly | “Production” HTTPS on AWS | **Ongoing ALB cost** — avoid for stop/start demos |
-
-**Recommendation for Capstone now:** **B** (sslip.io) or **A** until the team agrees to pay for a domain. If you buy a name later, prefer **D** (Elastic IP + DNS ± Let’s Encrypt), not **E**, so stopping EC2 still keeps costs low.
-
-### Free placeholders (no domain purchase)
-
-| Approach | Example | Notes |
-|----------|---------|--------|
-| **Raw IP** | `http://3.88.199.144:8000` | Works; IP often changes after stop/start |
-| **sslip.io / nip.io** | `http://3.88.199.144.sslip.io:8000` | Free DNS that resolves to that IP — no signup |
-| **DuckDNS** (optional) | `http://macroiq-demo.duckdns.org:8000` | Free subdomain; update when IP changes, or pair with Elastic IP |
-
-**sslip.io pattern:** take the public IPv4 and append `.sslip.io` (same port **8000** unless you front with nginx on 80).
-
-### When you buy a real domain later
-
-1. Confirm the name is **available** (e.g. `macroiq.com` may already be taken — have backups).  
-2. Register it (~$10–15/year).  
-3. Allocate an **Elastic IP** and associate it with the staging instance.  
-4. Create a DNS **A record** → that Elastic IP.  
-5. Optional HTTPS: Let’s Encrypt on the box (cheap) or ALB+ACM (costs more while left up).  
-
-Until then, put the current demo link in `deploy/aws.env` as a reminder (gitignored):
+| Option | Example URL | Notes |
+|--------|-------------|--------|
+| **A. Apex + port 80** (current goal) | `http://macroiq.org` | A `@` → EIP; Docker `-p 80:8000`; SG TCP 80 |
+| **B. Explicit :8000** | `http://macroiq.org:8000` | Only if you keep `-p 8000:8000` |
+| **C. sslip.io** | `http://EIP.sslip.io` | Free fallback without domain |
+| **D. ALB + ACM HTTPS** | `https://macroiq.org` | Ongoing ALB cost — skip for Capstone demos |
 
 ```env
-# Optional human-facing link for the team (not used by scripts yet)
-STAGING_PUBLIC_URL=http://x.x.x.x.sslip.io:8000
+STAGING_PUBLIC_URL=http://macroiq.org
 ```
 
-Share that URL with partners; still open **TCP 8000** to their IPs in the security group.
+Share that URL with partners; open **TCP 80** to their IPs in the security group.
 
 ## Legacy path (not ECR)
 

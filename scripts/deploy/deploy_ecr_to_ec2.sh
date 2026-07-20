@@ -78,8 +78,8 @@ ssh_ec2 env \
 msg "Waiting for /health (image may take a few minutes on first pull)..."
 OK=false
 for _ in $(seq 1 60); do
-  if curl -sf --max-time 5 "http://${IP}:8000/health" >/dev/null 2>&1; then
-    msg "Health check OK: http://${IP}:8000/health"
+  if curl -sf --max-time 5 "http://${IP}/health" >/dev/null 2>&1; then
+    msg "Health check OK: http://${IP}/health"
     OK=true
     break
   fi
@@ -88,7 +88,7 @@ done
 [[ "$OK" == true ]] || msg "WARNING: /health not ready yet — check: ssh and journalctl -u capstone-mvp-docker"
 
 msg ""
-msg "Staging URL: http://${IP}:8000"
+msg "Staging URL: http://${IP}  (or http://macroiq.org if DNS A @ points here)"
 msg "If first time, copy secrets:"
 msg "  scp -i ${EC2_KEY_PATH} .env ${EC2_SSH_USER}@${IP}:${CAPSTONE_ROOT}/.env"
 msg "  $0 --start-ec2"
