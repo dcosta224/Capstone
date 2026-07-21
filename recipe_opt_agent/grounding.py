@@ -8,6 +8,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from recipe_opt_agent.culinary_types import (
+    content_tokens,
+    families_compatible,
+    families_for_text,
+)
 from recipe_opt_agent.draft_schema import DraftIngredient, RecipeDraft, parse_draft
 from recipe_opt_agent.requirement_tags import (
     RequirementTag,
@@ -15,6 +20,10 @@ from recipe_opt_agent.requirement_tags import (
     ingredient_passes_tags,
     tag_violations_for_ingredient,
 )
+
+# Strict thresholds — the old 0.05 token Jaccard admitted BBQ sauce→soy sauce.
+DEFAULT_NEIGHBORHOOD_MIN_SCORE = 0.35
+DEFAULT_BROADER_MIN_SCORE = 0.42
 
 
 @dataclass
@@ -24,9 +33,10 @@ class GroundedLine:
     role: str
     fdc_id: int | None
     label: str
-    status: str  # matched | substituted | unresolved
+    status: str  # matched | substituted | unresolved | weak_match
     substitute_from: str | None = None
     notes: str = ""
+    match_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -37,21 +47,48 @@ class GroundingReport:
     matched: list[dict[str, Any]] = field(default_factory=list)
     substituted: list[dict[str, Any]] = field(default_factory=list)
     unresolved: list[dict[str, Any]] = field(default_factory=list)
+    weak_match: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "matched": self.matched,
             "substituted": self.substituted,
             "unresolved": self.unresolved,
+            "weak_match": self.weak_match,
         }
 
 
 def _token_overlap(a: str, b: str) -> float:
-    ta = {t for t in a.lower().split() if len(t) > 2}
-    tb = {t for t in b.lower().split() if len(t) > 2}
+    ta = content_tokens(a)
+    tb = content_tokens(b)
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / len(ta | tb)
+
+
+def _match_score(query: str, label: str) -> float:
+    """Score a catalog label against a draft ingredient name."""
+    q = (query or "").lower().strip()
+    lab = (label or "").lower().strip()
+    if not q or not lab:
+        return 0.0
+    q_fam = families_for_text(q)
+    lab_fam = families_for_text(lab)
+    if not families_compatible(q_fam, lab_fam):
+        return 0.0
+
+    score = _token_overlap(q, lab)
+    if q in lab or lab in q:
+        score = max(score, 0.85)
+    # Shared culinary family is strong evidence when tokens overlap at least a little
+    if q_fam and (q_fam & lab_fam) and score >= 0.15:
+        score = max(score, 0.55)
+    # Prefer exact content-token containment of the primary noun
+    q_toks = content_tokens(q)
+    lab_toks = content_tokens(lab)
+    if q_toks and q_toks <= lab_toks:
+        score = max(score, 0.7)
+    return float(score)
 
 
 def _search_catalog(
@@ -59,22 +96,19 @@ def _search_catalog(
     catalog: list[dict[str, Any]],
     tags: list[RequirementTag],
     *,
-    min_score: float = 0.05,
-) -> dict[str, Any] | None:
+    min_score: float = DEFAULT_NEIGHBORHOOD_MIN_SCORE,
+) -> tuple[dict[str, Any] | None, float]:
     best: dict[str, Any] | None = None
     best_score = -1.0
-    q = query.lower()
     for row in catalog:
         label = str(row.get("fdc_description") or row.get("label") or "")
         if not ingredient_passes_tags(label, tags, fdc_description=label):
             continue
-        score = _token_overlap(q, label)
-        if q in label.lower():
-            score += 0.5
+        score = _match_score(query, label)
         if score > best_score and score >= min_score:
             best_score = score
             best = row
-    return best
+    return best, (best_score if best is not None else 0.0)
 
 
 def resolve_line_to_fdc(
@@ -83,8 +117,10 @@ def resolve_line_to_fdc(
     neighborhood_catalog: list[dict[str, Any]],
     broader_catalog: list[dict[str, Any]] | None,
     tags: list[RequirementTag],
+    neighborhood_min_score: float = DEFAULT_NEIGHBORHOOD_MIN_SCORE,
+    broader_min_score: float = DEFAULT_BROADER_MIN_SCORE,
 ) -> GroundedLine:
-    """Neighborhood FDC first, then broader same-type catalog."""
+    """Neighborhood FDC first, then broader catalog — with culinary-type gates."""
     if not ingredient_passes_tags(line.name, tags):
         return GroundedLine(
             name=line.name,
@@ -96,7 +132,9 @@ def resolve_line_to_fdc(
             notes="draft line violates requirement tags",
         )
 
-    hit = _search_catalog(line.name, neighborhood_catalog, tags)
+    hit, score = _search_catalog(
+        line.name, neighborhood_catalog, tags, min_score=neighborhood_min_score
+    )
     if hit:
         fid = hit.get("fdc_id")
         label = str(hit.get("fdc_description") or hit.get("label") or line.name)
@@ -107,10 +145,14 @@ def resolve_line_to_fdc(
             fdc_id=int(fid) if fid is not None else None,
             label=label,
             status="matched",
+            notes=f"score={score:.3f}",
+            match_score=score,
         )
 
     if broader_catalog:
-        hit = _search_catalog(line.name, broader_catalog, tags)
+        hit, score = _search_catalog(
+            line.name, broader_catalog, tags, min_score=broader_min_score
+        )
         if hit:
             fid = hit.get("fdc_id")
             label = str(hit.get("fdc_description") or hit.get("label") or line.name)
@@ -122,7 +164,18 @@ def resolve_line_to_fdc(
                 label=label,
                 status="substituted",
                 substitute_from=line.name,
+                notes=f"score={score:.3f}",
+                match_score=score,
             )
+
+    # Probe best weak hit for diagnostics (not used in x0)
+    weak_hit, weak_score = _search_catalog(
+        line.name, neighborhood_catalog or list(broader_catalog or []), tags, min_score=0.05
+    )
+    notes = "no culinary-compatible FDC above threshold"
+    if weak_hit is not None:
+        weak_label = str(weak_hit.get("fdc_description") or weak_hit.get("label") or "")
+        notes = f"rejected weak candidate '{weak_label}' score={weak_score:.3f}"
 
     return GroundedLine(
         name=line.name,
@@ -131,6 +184,8 @@ def resolve_line_to_fdc(
         fdc_id=None,
         label=line.name,
         status="unresolved",
+        notes=notes,
+        match_score=weak_score if weak_hit is not None else None,
     )
 
 
@@ -349,6 +404,9 @@ def ground_draft_to_problem(
             report.matched.append(row)
         elif gl.status == "substituted":
             report.substituted.append(row)
+        elif gl.status == "weak_match":
+            report.weak_match.append(row)
+            report.unresolved.append(row)
         else:
             report.unresolved.append(row)
 

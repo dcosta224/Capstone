@@ -408,6 +408,25 @@ def node_diagnose(state: AgentState) -> dict[str, Any]:
         }
     )
 
+    # Block accept when high-hit neighborhood staples are missing or grounding failed.
+    from recipe_opt_agent.identity_gates import apply_identity_grounding_gates
+
+    ratio_loss_val = None
+    try:
+        ratio_loss_val = float(tl.get("ratio_value") or tl.get("ratio_surrogate") or float("nan"))
+        if ratio_loss_val != ratio_loss_val:  # NaN
+            ratio_loss_val = None
+    except (TypeError, ValueError):
+        ratio_loss_val = None
+    diag = apply_identity_grounding_gates(
+        diag,
+        problem={**problem_out, "opt": opt_pub, "foodon_basis_report": foodon_report},
+        grounding_report=problem_out.get("grounding_report") or state.get("grounding_report"),
+        identity_roles=list(state.get("identity_roles") or []),
+        nutrient_slack=float(opt_pub.get("nutrient_slack") or 0.0),
+        ratio_loss=ratio_loss_val,
+    )
+
     out: dict[str, Any] = {
         "hull": hull,
         "opt": opt_pub,
@@ -563,7 +582,10 @@ def _filter_candidates(
     *,
     critical: set[str],
     tags: list[RequirementTag],
+    problem: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from recipe_opt_agent.edit_grounding import filter_candidates_by_neighborhood_support
+
     filtered: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     for c in cands:
@@ -577,6 +599,10 @@ def _filter_candidates(
     if tags:
         filtered, tag_dropped = filter_candidates_by_tags(filtered, tags)
         dropped.extend(tag_dropped)
+    filtered, nb_dropped = filter_candidates_by_neighborhood_support(
+        filtered, problem=problem
+    )
+    dropped.extend(nb_dropped)
     return filtered, dropped
 
 
@@ -694,6 +720,20 @@ def node_propose(state: AgentState) -> dict[str, Any]:
             dish_structure=dish_structure,
         )
         problem = exp.get("problem") or problem
+        # Attest expansion shell ingredient labels for edit-support gates.
+        ctx = dict(problem.get("retrieval_context") or {})
+        harvest_labels: list[str] = list(ctx.get("expansion_harvest_labels") or [])
+        for shell in exp.get("shell_recipes") or []:
+            for lab in shell.get("ingredient_labels") or shell.get("labels") or []:
+                s = str(lab).strip()
+                if s and s not in harvest_labels:
+                    harvest_labels.append(s)
+            title = str(shell.get("title") or "").strip()
+            if title and title not in harvest_labels:
+                harvest_labels.append(title)
+        if harvest_labels:
+            ctx["expansion_harvest_labels"] = harvest_labels
+            problem["retrieval_context"] = ctx
         tools_used.append(
             {
                 "name": "expand_neighborhood_by_queries",
@@ -772,10 +812,12 @@ def node_propose(state: AgentState) -> dict[str, Any]:
         ]
         per_slot[sid] = merged
 
-    # Filter each slot's candidates (identity + tags).
+    # Filter each slot's candidates (identity + tags + neighborhood attestation).
     dropped: list[dict[str, Any]] = []
     for sid in list(per_slot.keys()):
-        kept, slot_dropped = _filter_candidates(per_slot[sid], critical=critical, tags=tags)
+        kept, slot_dropped = _filter_candidates(
+            per_slot[sid], critical=critical, tags=tags, problem=problem
+        )
         per_slot[sid] = kept
         dropped.extend(slot_dropped)
     flat_candidates = [c for cands in per_slot.values() for c in cands]
@@ -1990,12 +2032,14 @@ def node_ground_recipe(state: AgentState) -> dict[str, Any]:
         offline=bool(problem_stub.get("grounding_offline") or problem_stub.get("creative_offline")),
     )
     roles = resolve_identity_roles(
-        title=chosen.get("title") or state.get("title") or "",
-        request=state.get("user_request") or "",
+        title=chosen.get("title") or state.get("title") or draft.title or "",
+        request=state.get("user_request") or state.get("taste_text") or "",
         ingredients=chosen.get("ingredients") or [],
         templates=_cfg(state).identity_templates,
         use_llm=True,
         model=_cfg(state).identity_extract_model,
+        foodon_basis_report=problem.get("foodon_basis_report"),
+        prefer_title_priors=True,
     )
     report_dict = report.to_dict()
     resolve_rate = None

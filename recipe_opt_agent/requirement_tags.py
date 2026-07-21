@@ -140,6 +140,26 @@ def deduce_tags_from_text(request: str) -> list[RequirementTag]:
     return out
 
 
+_DIETARY_EVIDENCE: dict[str, tuple[str, ...]] = {
+    "vegetarian": ("vegetarian", "veggie", "no meat", "meatless", "without meat", "plant-based", "plant based"),
+    "vegan": ("vegan", "plant-based", "plant based"),
+    "no_pork": ("no pork", "without pork", "pork-free", "pork free"),
+    "no_beef": ("no beef", "without beef", "beef-free", "beef free"),
+    "no_dairy": ("no dairy", "dairy-free", "dairy free", "lactose-free", "lactose free"),
+    "gluten_free": ("gluten-free", "gluten free", "no gluten", "without gluten"),
+}
+
+
+def dietary_tag_supported_by_request(tag_id: str, request: str) -> bool:
+    """True only when the request text explicitly evidences this dietary tag."""
+    text = (request or "").lower()
+    phrases = _DIETARY_EVIDENCE.get(tag_id, ())
+    if not phrases:
+        # Unknown dietary tag: require the tag_id itself as a word-ish cue
+        return tag_id.replace("_", " ") in text or tag_id in text
+    return any(p in text for p in phrases)
+
+
 def deduce_requirement_tags(
     request: str,
     *,
@@ -169,11 +189,26 @@ def deduce_requirement_tags(
             llm_tags = deduce_tags_llm(request, model=tag_model)
             for raw in llm_tags:
                 t = _normalize_tag(raw)
-                if t:
-                    merged[t.tag_id] = t
+                if not t:
+                    continue
+                # Never accept dietary restrictions the request does not explicitly support.
+                if t.kind == "dietary_restriction" and not dietary_tag_supported_by_request(
+                    t.tag_id, request
+                ):
+                    continue
+                merged[t.tag_id] = t
         except Exception:
             pass
-    return list(merged.values())
+
+    # Also strip draft/LLM dietary tags that lack request evidence (draft may invent them).
+    cleaned: dict[str, RequirementTag] = {}
+    for tag_id, t in merged.items():
+        if t.kind == "dietary_restriction" and not dietary_tag_supported_by_request(tag_id, request):
+            # Keep if lexical deduction found it (heuristic phrases already in request)
+            if not any(x.tag_id == tag_id for x in lexical):
+                continue
+        cleaned[tag_id] = t
+    return list(cleaned.values())
 
 
 def tag_violations_for_ingredient(

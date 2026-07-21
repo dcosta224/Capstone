@@ -7,12 +7,13 @@ from typing import Any
 from recipe_opt_agent.config import AgentConfig
 
 # Markers that suggest lexical tag extraction may be incomplete / ambiguous.
+# Avoid bare substrings that appear inside ordinary words (e.g. "ish" ⊂ "dish").
 _AMBIGUOUS_TAG_MARKERS = (
     "maybe",
     "kinda",
     "sort of",
-    "ish",
-    "prefer",
+    "-ish",
+    " prefer ",
     "if possible",
     "optional",
     "mostly",
@@ -23,13 +24,48 @@ _AMBIGUOUS_TAG_MARKERS = (
     "plant forward",
 )
 
+# Diet-ish cues that lexical may have missed (still require explicit language).
+_DIET_CUE_MARKERS = (
+    "allerg",
+    "intoleran",
+    "dairy-free",
+    "dairy free",
+    "gluten-free",
+    "gluten free",
+    "plant-based",
+    "plant based",
+    "meatless",
+    "without meat",
+    "no meat",
+    "vegetarian",
+    "vegan",
+    "pescatarian",
+    "halal",
+    "kosher",
+)
+
 
 def tags_need_llm(request: str, lexical_tags: list[Any]) -> bool:
-    """Use LLM tags when lexical found nothing or text looks ambiguous."""
-    text = (request or "").lower()
-    if not lexical_tags and len(text.strip()) >= 12:
+    """Use LLM tags only for ambiguous / explicit diet language — not every request.
+
+    Previously any ≥12-char request with empty lexical tags called the tags LLM,
+    which invented false dietary restrictions (e.g. vegetarian on bobotie).
+    """
+    text = f" {(request or '').lower()} "
+    if any(m in text for m in _AMBIGUOUS_TAG_MARKERS):
         return True
-    return any(m in text for m in _AMBIGUOUS_TAG_MARKERS)
+    # also allow unpadded prefer at start
+    raw = (request or "").lower()
+    if raw.startswith("prefer ") or " prefer " in f" {raw} ":
+        return True
+    has_dietary = any(
+        getattr(t, "kind", None) == "dietary_restriction"
+        or (isinstance(t, dict) and t.get("kind") == "dietary_restriction")
+        for t in (lexical_tags or [])
+    )
+    if any(m in raw for m in _DIET_CUE_MARKERS) and not has_dietary:
+        return True
+    return False
 
 
 def select_tags_model(cfg: AgentConfig) -> str:

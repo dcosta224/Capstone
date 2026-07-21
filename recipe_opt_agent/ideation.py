@@ -332,7 +332,7 @@ def ground_ideas_to_candidates(
             continue
         branch = str(idea.get("branch") or "in_distribution")
         replace = idea.get("replace")
-        hit = _search_catalog(name, catalog, tags, min_score=0.08)
+        hit, _score = _search_catalog(name, catalog, tags, min_score=0.35)
         if hit is None and branch.startswith("ood"):
             # Fuzzy match against OOD catalog labels
             for food in OOD_PROTEIN_FOODS:
@@ -343,6 +343,11 @@ def ground_ideas_to_candidates(
                         "ood": True,
                     }
                     break
+            if hit is None:
+                # Retry catalog with a softer floor for OOD-labeled catalog rows only
+                soft_hit, soft_score = _search_catalog(name, catalog, tags, min_score=0.2)
+                if soft_hit is not None and (soft_hit.get("ood") or soft_score >= 0.35):
+                    hit = soft_hit
         if action == "remove":
             target = current.get(str(replace or name).lower())
             if not target:
