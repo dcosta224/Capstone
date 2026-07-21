@@ -228,6 +228,19 @@ class CountPortionCandidate:
 
 
 @dataclass(frozen=True)
+class MassPortionCandidate:
+    portion_id: int
+    fdc_id: int
+    ref_amount: float
+    mass_unit: str
+    gram_weight: float
+    seq_num: int
+    data_points: int
+    modifier: str
+    portion_description: str
+
+
+@dataclass(frozen=True)
 class PortionCapabilitySets:
     volume_fdc_ids: frozenset[int]
     count_fdc_ids: frozenset[int]
@@ -521,6 +534,88 @@ def normalize_count_portion_row(row: dict[str, Any]) -> CountPortionCandidate | 
         fdc_id=int(row["fdc_id"]),
         ref_amount=ref_amount,
         count_label=count_label,
+        gram_weight=gram_weight,
+        seq_num=_optional_int(row.get("seq_num")),
+        data_points=_parse_data_points(row.get("data_points")),
+        modifier=modifier,
+        portion_description=portion_description,
+    )
+
+
+def _mass_unit_from_text(text: str) -> str | None:
+    if not text or text_has_volume(text):
+        return None
+    match = MASS_TOKEN_RE.search(text)
+    if match:
+        token = match.group(1).lower()
+        try:
+            return normalize_mass_unit(token)
+        except UnitConversionError:
+            pass
+        mapped = normalize_unit(token)
+        if mapped:
+            try:
+                return normalize_mass_unit(mapped)
+            except UnitConversionError:
+                return mapped
+    return None
+
+
+def _resolve_mass_unit_from_row(row: dict[str, Any]) -> str | None:
+    measure_unit_id = row.get("measure_unit_id")
+    if not _is_missing(measure_unit_id):
+        mid = int(measure_unit_id)
+        if mid in MASS_MEASURE_UNIT_IDS:
+            return MASS_MEASURE_UNIT_IDS[mid]
+
+    modifier, portion_description, measure_unit_name = _portion_text_fields(row)
+    if measure_unit_name.lower() in MASS_MEASURE_UNIT_NAMES:
+        name = measure_unit_name.lower()
+        if name == "oz":
+            return "ounce"
+        if name in {"lb", "paired cooked w", "paired raw w"}:
+            return "pound"
+
+    for field in _portion_fields_to_search(row):
+        unit = _mass_unit_from_text(field)
+        if unit:
+            return unit
+
+    for field in (modifier, portion_description):
+        unit = _mass_unit_from_text(field or "")
+        if unit:
+            return unit
+    return None
+
+
+def normalize_mass_portion_row(row: dict[str, Any]) -> MassPortionCandidate | None:
+    """Map a food_portion DB row to a mass PortionCandidate, or None."""
+    if normalize_portion_row(row) is not None:
+        return None
+    if normalize_count_portion_row(row) is not None:
+        return None
+
+    gram_weight = float(row["gram_weight"])
+    if gram_weight <= 0:
+        return None
+    if not _resolve_mass_from_row(row):
+        return None
+
+    mass_unit = _resolve_mass_unit_from_row(row)
+    if not mass_unit:
+        return None
+
+    amount = row.get("amount")
+    ref_amount = float(amount) if amount not in (None, "") else 1.0
+    if ref_amount <= 0:
+        ref_amount = 1.0
+
+    modifier, portion_description, _ = _portion_text_fields(row)
+    return MassPortionCandidate(
+        portion_id=int(row["id"]),
+        fdc_id=int(row["fdc_id"]),
+        ref_amount=ref_amount,
+        mass_unit=mass_unit,
         gram_weight=gram_weight,
         seq_num=_optional_int(row.get("seq_num")),
         data_points=_parse_data_points(row.get("data_points")),
