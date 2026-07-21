@@ -265,6 +265,7 @@ def _call_json_llm(
     user: str,
     model: str,
     heuristic_fn: Callable[[], dict[str, Any]] | None = None,
+    temperature: float | None = 0.2,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     if not os.environ.get("OPENAI_API_KEY"):
@@ -275,12 +276,15 @@ def _call_json_llm(
     from recipe_opt_agent.observability import get_openai_client
 
     client = get_openai_client()
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=0.2,
-        response_format={"type": "json_object"},
-        messages=messages,
-    )
+    create_kwargs: dict[str, Any] = {
+        "model": model,
+        "response_format": {"type": "json_object"},
+        "messages": messages,
+    }
+    # Some models (e.g. gpt-5.5) only accept the default temperature; omit the param.
+    if temperature is not None:
+        create_kwargs["temperature"] = temperature
+    resp = client.chat.completions.create(**create_kwargs)
     content = resp.choices[0].message.content or "{}"
     data = _extract_json(content)
     trace = {"mode": "openai", "model": model, "messages": messages, "raw_response": content}
@@ -388,6 +392,7 @@ def llm_draft_recipe(
     macro_box: dict | None = None,
     example_recipe: dict | None = None,
     model: str = "gpt-4.1-mini",
+    temperature: float | None = 0.2,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     data, trace = _call_json_llm(
         system=DRAFT_SYSTEM_PROMPT,
@@ -395,6 +400,7 @@ def llm_draft_recipe(
             request, macro_box=macro_box, example_recipe=example_recipe
         ),
         model=model,
+        temperature=temperature,
         heuristic_fn=lambda: _heuristic_draft(request, macro_box=macro_box),
     )
     return data, trace

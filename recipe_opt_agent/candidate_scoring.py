@@ -76,18 +76,31 @@ def robust_z_logistic_badness(
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
         return []
+
+    def _sig(x: float) -> float:
+        # Clamp to avoid OverflowError on math.exp for extreme z-scores / L_total.
+        t = max(-60.0, min(60.0, float(x)))
+        return float(1.0 / (1.0 + math.exp(-t)))
+
     if arr.size == 1:
         v = float(arr[0])
-        return [float(1.0 / (1.0 + math.exp(-steepness * (v - z0))))]
+        if not math.isfinite(v):
+            return [1.0]
+        return [_sig(steepness * (v - z0))]
 
-    med = float(np.median(arr))
-    mad = _mad(arr)
+    finite_mask = np.isfinite(arr)
+    med = float(np.median(arr[finite_mask])) if np.any(finite_mask) else 0.0
+    mad_vals = np.where(finite_mask, arr, med)
+    mad = _mad(mad_vals)
     scale = 1.4826 * mad + eps
     out: list[float] = []
     for v in arr:
-        z = (float(v) - med) / scale
-        bad = 1.0 / (1.0 + math.exp(-steepness * (z - z0)))
-        out.append(float(bad))
+        fv = float(v)
+        if not math.isfinite(fv):
+            out.append(1.0)
+            continue
+        z = (fv - med) / scale
+        out.append(_sig(steepness * (z - z0)))
     return out
 
 

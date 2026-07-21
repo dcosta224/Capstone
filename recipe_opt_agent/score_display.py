@@ -175,6 +175,19 @@ def resolve_chosen_context(payload: dict[str, Any]) -> dict[str, Any]:
         opt = chosen.get("opt")
     if not opt:
         opt = payload.get("opt")
+    # Pool-entry opts are often slim (objective/pfc only). Prefer a richer opt that
+    # carries term_losses when the top-level payload has one.
+    top_opt = payload.get("opt") if isinstance(payload.get("opt"), dict) else None
+    if isinstance(top_opt, dict) and top_opt.get("term_losses"):
+        if not isinstance(opt, dict) or not opt.get("term_losses"):
+            opt = top_opt
+        else:
+            # Merge missing diagnostic fields from top-level opt.
+            merged = dict(opt)
+            for k, v in top_opt.items():
+                if k not in merged or merged.get(k) in (None, {}, []):
+                    merged[k] = v
+            opt = merged
 
     problem = payload.get("problem") or {}
     if isinstance(pool_entry, dict) and pool_entry.get("next_problem"):
@@ -236,7 +249,15 @@ def extract_ratio_and_nutrient(
     ctx = resolve_chosen_context(payload)
     opt = ctx["opt"]
     tl = opt.get("term_losses") if isinstance(opt, dict) else None
-    ratio_n = len((ctx.get("problem") or {}).get("ratio_samples") or [])
+    raw_rs = (ctx.get("problem") or {}).get("ratio_samples")
+    if isinstance(raw_rs, str) or raw_rs is None:
+        # Artifact omission sentinel (e.g. "<omitted shape=list[0]>") or missing.
+        ratio_n = 0
+    else:
+        try:
+            ratio_n = len(raw_rs)
+        except TypeError:
+            ratio_n = 0
     ratio, ratio_src = _ratio_loss_from_term_losses(tl, ratio_samples_n=ratio_n)
     # Fallback: sum of per-basis share losses (still a fidelity / ratio-family signal)
     if ratio is None and isinstance(tl, dict):
@@ -426,7 +447,7 @@ def _extract_holistic_0_10(payload: dict[str, Any]) -> tuple[float | None, str]:
     if isinstance(feval, dict) and feval.get("overall_score_0_10") is not None:
         v = _as_float(feval["overall_score_0_10"])
         if v is not None:
-            return max(0.0, min(10.0, v)), "gpt-4o_final_evaluator"
+            return max(0.0, min(10.0, v)), "final_evaluator"
 
     judge = payload.get("judge_result") or (payload.get("chosen") or {}).get("judge") or {}
     if isinstance(judge, dict):

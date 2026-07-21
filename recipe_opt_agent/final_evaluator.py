@@ -1,4 +1,4 @@
-"""GPT-4o holistic evaluation of the final selected recipe.
+"""GPT-5.5 holistic evaluation of the final selected recipe.
 
 Runs after candidate arbitration. Uses neighborhood hull stretch (how far the macro
 target sits outside typical neighbor hulls) to calibrate how strict fidelity should
@@ -40,7 +40,7 @@ Score dimensions (0–10 each, then overall_score_0_10):
 
 Rules:
 - If dietary_precheck.all_restrictions_met is false, set dietary_violation_flag=true
-  and cap overall_score_0_10 at 4 unless the violation is clearly a false positive.
+  and reflect the violation in scores and concerns; do not apply a fixed numeric score cap.
 - Small loss improvements (e.g. 1–5% better ratio/nutrient) NEVER justify clash
   ingredients when stretch is in_hull or edge.
 - When stretch is outside_hull, a plausible_extension (e.g. lean poultry in pasta) can
@@ -222,7 +222,7 @@ def evaluate_final_recipe(
     state: dict[str, Any],
     final_payload: dict[str, Any],
     *,
-    model: str = "gpt-4o",
+    model: str = "gpt-5.5",
 ) -> dict[str, Any] | None:
     """Return evaluation dict with scores, flags, summary_markdown, _llm_trace."""
     briefing = build_final_eval_briefing(state, final_payload)
@@ -264,12 +264,15 @@ def evaluate_final_recipe(
         from recipe_opt_agent.observability import get_openai_client
 
         client = get_openai_client()
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            messages=messages,
-        )
+        create_kwargs: dict[str, Any] = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": messages,
+        }
+        # gpt-5.x rejects non-default temperature; omit the param for that family.
+        if not str(model).startswith("gpt-5"):
+            create_kwargs["temperature"] = 0.2
+        resp = client.chat.completions.create(**create_kwargs)
         content = resp.choices[0].message.content or "{}"
         data = _extract_json(content)
     except Exception as exc:

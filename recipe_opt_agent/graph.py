@@ -1663,13 +1663,13 @@ def _attach_final_gpt4o_evaluation(
     state: AgentState,
     final_payload: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
-    """GPT-4o holistic evaluation of the selected recipe; returns (payload, eval, tools)."""
+    """GPT-5.5 holistic evaluation of the selected recipe; returns (payload, eval, tools)."""
     from recipe_opt_agent.final_evaluator import evaluate_final_recipe
     from recipe_opt_agent.score_display import band_for_holistic_0_10
 
     tools: list[dict[str, Any]] = []
     try:
-        evaluation = evaluate_final_recipe(state, final_payload, model="gpt-4o")
+        evaluation = evaluate_final_recipe(state, final_payload, model="gpt-5.5")
     except Exception as exc:
         evaluation = {"error": str(exc)}
     if not evaluation or evaluation.get("error"):
@@ -1677,13 +1677,14 @@ def _attach_final_gpt4o_evaluation(
 
     public = {k: v for k, v in evaluation.items() if k not in {"_llm_trace", "briefing"}}
     final_payload["final_evaluation"] = public
+    judge_model = (evaluation.get("_llm_trace") or {}).get("model") or "gpt-5.5"
     if evaluation.get("overall_score_0_10") is not None:
         h = float(evaluation["overall_score_0_10"])
         display = dict(final_payload.get("display_scores") or {})
         display["holistic_0_10"] = {
             "value": h,
             "band": band_for_holistic_0_10(h),
-            "source": "gpt-4o_final_evaluator",
+            "source": f"{judge_model}_final_evaluator",
         }
         final_payload["display_scores"] = display
         tel = dict(final_payload.get("run_telemetry") or {})
@@ -1692,13 +1693,13 @@ def _attach_final_gpt4o_evaluation(
 
     tools.append(
         {
-            "name": "final_evaluator_gpt4o",
+            "name": "final_evaluator_gpt55",
             "purpose": (
-                "GPT-4o holistic evaluation: ingredient plausibility calibrated by neighborhood "
+                "GPT-5.5 holistic evaluation: ingredient plausibility calibrated by neighborhood "
                 "hull stretch, user needs, dietary restriction flag"
             ),
             "mode": (evaluation.get("_llm_trace") or {}).get("mode"),
-            "model": (evaluation.get("_llm_trace") or {}).get("model") or "gpt-4o",
+            "model": judge_model,
             "output_summary": {
                 "overall_score_0_10": evaluation.get("overall_score_0_10"),
                 "ingredients_make_sense": evaluation.get("ingredients_make_sense"),
