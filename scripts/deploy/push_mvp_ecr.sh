@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the MVP Docker image (CPU-only PyTorch) and push to ECR.
+# Build the recipe-opt agent Docker image (CPU-only PyTorch) and push to ECR.
 #
 # Usage:
 #   ./scripts/deploy/push_mvp_ecr.sh
@@ -13,7 +13,7 @@ source "${SCRIPT_DIR}/_common.sh"
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ECR_REPO="${ECR_REPO:-macroiq}"
-LOCAL_IMAGE="${LOCAL_IMAGE:-capstone-mvp:local}"
+LOCAL_IMAGE="${LOCAL_IMAGE:-capstone-agent:local}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 NO_CACHE=false
 
@@ -34,10 +34,12 @@ require_aws_cli
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
 
-msg "=== Build + push MVP image to ECR ==="
+msg "=== Build + push recipe-opt agent image to ECR ==="
 msg "Account:  ${AWS_ACCOUNT_ID}"
 msg "Region:   ${AWS_REGION}"
 msg "Repo:     ${ECR_REPO}"
+msg "Image:    ${LOCAL_IMAGE} -> ${IMAGE_URI}:deployment"
+msg "App:      recipe_opt_web.server:app :8000"
 msg "Platform: ${DOCKER_PLATFORM}"
 msg "Local:    ${LOCAL_IMAGE}"
 msg "Remote:   ${IMAGE_URI}:latest"
@@ -61,11 +63,14 @@ aws ecr get-login-password --region "$AWS_REGION" | \
   docker login --username AWS --password-stdin \
   "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-msg "Tagging ${IMAGE_URI}:latest"
+msg "Tagging ${IMAGE_URI}:latest and ${IMAGE_URI}:deployment"
 docker tag "$LOCAL_IMAGE" "${IMAGE_URI}:latest"
+docker tag "$LOCAL_IMAGE" "${IMAGE_URI}:deployment"
 
 msg "Pushing ${IMAGE_URI}:latest"
 docker push "${IMAGE_URI}:latest"
+msg "Pushing ${IMAGE_URI}:deployment"
+docker push "${IMAGE_URI}:deployment"
 
 msg ""
-msg "Done: ${IMAGE_URI}:latest"
+msg "Done: ${IMAGE_URI}:deployment (and :latest)"

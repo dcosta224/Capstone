@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs ON the EC2 instance: install Docker if needed, pull MVP image from ECR, restart systemd unit.
+# Runs ON the EC2 instance: install Docker if needed, pull agent image from ECR, restart systemd unit.
 # Invoked via SSH from deploy_ecr_to_ec2.sh — do not run locally.
 set -euo pipefail
 

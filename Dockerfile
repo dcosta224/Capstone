@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-# MVP image: CPU-only PyTorch (no CUDA/NVIDIA wheels). See pyproject.toml [tool.uv.sources].
+# Recipe optimization agent image (CPU-only PyTorch). See pyproject.toml [tool.uv.sources].
+# Installs main deps only: `uv sync --frozen --no-dev` (no notebook/pipeline/mvp extras).
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 
@@ -8,21 +9,44 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
-    HF_HOME=/app/.cache/huggingface
+    HF_HOME=/app/.cache/huggingface \
+    PYTHONPATH=/app/scripts:/app
 
-# .python-version is gitignored / often absent; image already pins Python 3.11.
 COPY pyproject.toml uv.lock ./
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
-COPY mvp_web/ mvp_web/
-COPY mvp_agent/ mvp_agent/
-COPY scripts/ scripts/
+COPY recipe_opt_agent/ recipe_opt_agent/
+COPY recipe_opt_web/ recipe_opt_web/
+# Agent runtime modules under scripts/ (PYTHONPATH). Avoid shipping the whole
+# scripts tree so pipeline/notebook helpers stay out of the image.
+COPY scripts/db.py \
+     scripts/mvp_data.py \
+     scripts/mvp_nutrient_fit.py \
+     scripts/mvp_recipe_ranker.py \
+     scripts/recipe_macro_optimizer.py \
+     scripts/recipe_data_access.py \
+     scripts/recipe_similarity.py \
+     scripts/hull_geometry.py \
+     scripts/loss_field.py \
+     scripts/opt_diagnosis.py \
+     scripts/weighted_empirical_opt.py \
+     scripts/canonical_optimization.py \
+     scripts/neighborhood_expansion.py \
+     scripts/augmentation_retrieve.py \
+     scripts/foodon_index.py \
+     scripts/foodon_hierarchy_cache.py \
+     scripts/
+RUN mkdir -p foodon_web/cache
+COPY foodon_web/cache/foodon_index.json foodon_web/cache/foodon_index.json
+COPY foodon_web/cache/foodon_hierarchy.json foodon_web/cache/foodon_hierarchy.json
+COPY foodon_web/cache/fdc_foodon_map.json foodon_web/cache/fdc_foodon_map.json
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# Warm MiniLM weights used by neighborhood / creative embedding paths.
 RUN --mount=type=cache,target=/root/.cache/huggingface \
     uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
@@ -36,7 +60,9 @@ RUN apt-get update \
 
 ENV PATH="/app/.venv/bin:$PATH" \
     HF_HOME=/app/.cache/huggingface \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/scripts:/app \
+    RECIPE_DATA_SOURCE=db
 
 COPY --from=builder /app /app
 
@@ -45,4 +71,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"
 
-CMD ["uvicorn", "mvp_web.server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "recipe_opt_web.server:app", "--host", "0.0.0.0", "--port", "8000"]

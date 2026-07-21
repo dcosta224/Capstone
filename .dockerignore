@@ -27,6 +27,8 @@ mlruns/
 mlartifacts/
 mlflow.db
 mvp_web/cache/
+mvp_agent/
+mvp_web/
 
 *.csv
 *.txt

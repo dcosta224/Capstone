@@ -1,4 +1,4 @@
-# Build the MVP Docker image and push to Amazon ECR.
+# Build the recipe-opt agent Docker image and push to Amazon ECR.
 # Trigger: pushes to `deployment` only (not main — add main later when ready).
 #
 # Required GitHub repository secrets:
@@ -7,7 +7,7 @@
 #
 # Uses us-east-1 / ECR repo macroiq (matches push_mvp_ecr.sh).
 # Cost note: builds/pushes an image only — no EC2, ECS, or App Runner.
-name: Push MVP image to ECR
+name: Push agent image to ECR
 
 on:
   push:

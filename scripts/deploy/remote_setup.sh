@@ -8,7 +8,7 @@ set -euo pipefail
 : "${S3_BUCKET_ARTIFACTS:?}"
 : "${AWS_REGION:?}"
 : "${CAPSTONE_GIT_REPO:?}"
-: "${CAPSTONE_BRANCH:=staging}"
+: "${CAPSTONE_BRANCH:=deployment}"
 
 log() { printf '[remote_setup] %s\n' "$*"; }
 
@@ -47,26 +47,10 @@ log "Syncing S3 artifacts scratch/ -> ${CAPSTONE_ROOT}/scratch/"
 mkdir -p "${CAPSTONE_ROOT}/scratch"
 aws s3 sync "s3://${S3_BUCKET_ARTIFACTS}/scratch/" "${CAPSTONE_ROOT}/scratch/" --region "$AWS_REGION" || true
 
-if aws s3 ls "s3://${S3_BUCKET_ARTIFACTS}/mvp_web/cache/" --region "$AWS_REGION" 2>/dev/null | grep -q .; then
-  log "Syncing MVP cache..."
-  mkdir -p "${CAPSTONE_ROOT}/mvp_web/cache"
-  aws s3 sync "s3://${S3_BUCKET_ARTIFACTS}/mvp_web/cache/" \
-    "${CAPSTONE_ROOT}/mvp_web/cache/" --region "$AWS_REGION"
-fi
-
-log "uv sync..."
+log "uv sync (agent runtime deps)..."
 export PATH="${HOME}/.local/bin:${PATH}"
 cd "$CAPSTONE_ROOT"
-uv sync
-
-if [[ ! -f "${CAPSTONE_ROOT}/mvp_web/cache/mvp_corpus.pkl" ]]; then
-  log "Warming MVP cache (requires .env + Supabase)..."
-  if [[ -f "${CAPSTONE_ROOT}/.env" ]]; then
-    uv run python scripts/warm_mvp_cache.py || log "Cache warm failed — check .env"
-  else
-    log "No .env — skip cache warm. Copy .env then re-run load_to_ebs.sh"
-  fi
-fi
+uv sync --no-dev
 
 log "Installing systemd unit..."
 sudo cp "${CAPSTONE_ROOT}/infra/aws/capstone-mvp.service" /etc/systemd/system/capstone-mvp.service
@@ -75,7 +59,7 @@ sudo systemctl enable capstone-mvp
 
 if [[ -f "${CAPSTONE_ROOT}/.env" ]]; then
   sudo systemctl restart capstone-mvp
-  log "Restarted capstone-mvp service."
+  log "Restarted capstone-mvp service (recipe_opt_web)."
 else
   log "Skipping service start — no .env at ${CAPSTONE_ROOT}/.env"
 fi

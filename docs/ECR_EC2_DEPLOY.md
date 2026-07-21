@@ -1,6 +1,6 @@
-# ECR push + EC2 hosting (MacroIQ MVP)
+# ECR push + EC2 hosting (recipe optimization agent)
 
-How the Capstone MVP gets from git into a runnable staging site on AWS.
+How the Capstone **recipe opt agent** gets from git into a runnable staging site on AWS.
 
 Supabase remains the database. This doc covers **container build/push** and **on-demand EC2 demos** only. For S3 data/artifacts and the older git+`uv` EC2 path, see [AWS_WORKFLOW.md](AWS_WORKFLOW.md).
 
@@ -11,7 +11,7 @@ Supabase remains the database. This doc covers **container build/push** and **on
             │
             ▼
   GitHub Actions (.github/workflows/push-ecr.yml)
-            │  docker build (linux/amd64)
+            │  docker build (linux/amd64) → recipe_opt_web
             ▼
   Amazon ECR  repo: macroiq
             │  tags: :<git-sha>  and  :deployment
@@ -21,7 +21,7 @@ Supabase remains the database. This doc covers **container build/push** and **on
   EC2 staging (e.g. MacroIQDemo)
             │  docker pull + systemd (capstone-mvp-docker)
             ▼
-  http://macroiq.org   (host :80 → container :8000)
+  http://macroiq.org   (host :80 → container :8000 / recipe_opt_web)
 ```
 
 | Piece | What it does | Cost when idle |
@@ -72,9 +72,12 @@ Same idea as CI; CI is the normal path on `deployment`.
 
 ### Image contents
 
-- FastAPI app: `uvicorn mvp_web.server:app` on port **8000**  
-- Health: `GET /health`  
-- Secrets are **not** baked in — supplied at runtime via `/opt/capstone/.env` on EC2  
+- FastAPI app: `uvicorn recipe_opt_web.server:app` on port **8000** (recipe optimization agent UI)
+- Health: `GET /health`
+- Runtime deps only (`uv sync --frozen --no-dev`) — no notebook/pipeline/mvp extras
+- FoodOn caches baked in: `foodon_web/cache/{foodon_index,foodon_hierarchy,fdc_foodon_map}.json`
+- Secrets are **not** baked in — supplied at runtime via `/opt/capstone/.env` on EC2
+- Default `RECIPE_DATA_SOURCE=db` (Supabase) inside the container
 
 ## Part 2 — EC2 hosting (run the ECR image)
 
@@ -226,11 +229,11 @@ Share that URL with partners; open **TCP 80** to their IPs in the security group
 
 | Path | Purpose |
 |------|---------|
-| `Dockerfile` | MVP image definition |
-| `.github/workflows/push-ecr.yml` | CI build → ECR |
+| `Dockerfile` | Agent image (`recipe_opt_web` + FoodOn caches) |
+| `.github/workflows/push-ecr.yml` | CI build → ECR on `deployment` pushes |
 | `.github/workflows/deploy-runtime.yml` | Manual checklist only (no auto live deploy) |
-| `mvp_web/launch_ready.py` | `/health` → `launch` readiness block |
-| `mvp_web/auth.py` | Cognito stubs; `AUTH_ENABLED=0` by default |
+| `recipe_opt_web/server.py` | FastAPI app; `GET /health` |
+| `infra/aws/capstone-mvp-docker.service` | EC2: pull ECR image, map host `:80` → `:8000` |
 
 ## Troubleshooting
 

@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    # Recipe opt agent / web runtime (Docker: uv sync --no-dev)
     "numpy>=2.4.5",
     "openai>=1.40.0",
     "pandas>=2.2,<3",
@@ -15,16 +16,24 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
     "cvxpy>=1.6.0",
+    "scipy>=1.14.0",
+    "langgraph>=0.2",
+    "rdflib>=7.0",
+    "pyarrow>=19.0.0",
+    "langsmith>=0.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+# Legacy Strands MVP agent + AWS helpers (not installed in the agent Docker image)
+mvp = [
     "strands-agents>=1.40",
     "boto3>=1.35",
     "botocore[crt]>=1.35",
     "pillow>=12.2.0",
     "pyparsing>=3.3.2",
-    "langgraph>=0.2",
 ]
-
-[project.optional-dependencies]
-dev = ["pytest>=8.0"]
 
 notebook = [
     "ipykernel>=7.2.0",
@@ -40,7 +49,6 @@ pipeline = [
     "rapidfuzz>=3.14.5",
     "faiss-cpu>=1.9.0",
     "scikit-learn>=1.6.0",
-    "pyarrow>=19.0.0",
     "tqdm>=4.67.0",
     "mlflow>=3",
     "networkx>=3.6.1",

@@ -1,5 +1,5 @@
 [Unit]
-Description=Capstone MVP Web (Docker image from ECR)
+Description=Capstone Recipe Opt Agent (Docker image from ECR)
 After=network-online.target docker.service
 Requires=docker.service
 Wants=network-online.target
@@ -13,6 +13,8 @@ ExecStartPre=/usr/bin/docker pull ${ECR_IMAGE_URI}
 ExecStart=/usr/bin/docker run --name capstone-mvp --rm \
   -p 80:8000 \
   --env-file /opt/capstone/.env \
+  -e PYTHONPATH=/app/scripts:/app \
+  -e RECIPE_DATA_SOURCE=db \
   ${ECR_IMAGE_URI}
 ExecStop=-/usr/bin/docker stop capstone-mvp
 Restart=on-failure
