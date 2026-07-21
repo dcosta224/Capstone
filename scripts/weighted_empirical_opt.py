@@ -178,6 +178,11 @@ def term_losses(
         z_i = node_grams_sum(x, nid, ingredient_basis) / total_mass
         out[nid] = marginal_weight * empirical_cdf_l1_loss(z_i, samples, weights_map.get(nid))
         out[f"{nid}__share"] = z_i
+        out[f"{nid}__abs_dev_median"] = abs(z_i - float(np.median(samples)))
+    # Aggregate median-centered Wasserstein (mean |z − median|) for display / eval.
+    med_terms = [v for k, v in out.items() if str(k).endswith("__abs_dev_median")]
+    if med_terms:
+        out["mean_abs_dev_from_median"] = float(np.mean(med_terms))
     out["ratio_surrogate"] = ratio_weight * ratio_surrogate_value(
         x,
         ratio_samples=ratio_samples,

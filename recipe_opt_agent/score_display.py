@@ -229,6 +229,10 @@ def _ratio_loss_from_term_losses(
     """Return (value, source). Never invent 0 from missing keys / empty samples."""
     if not isinstance(tl, dict) or not tl:
         return None, None
+    # Prefer explicit median-centered Wasserstein when the optimizer recorded it.
+    med = _as_float(tl.get("mean_abs_dev_from_median"))
+    if med is not None:
+        return med, "mean_abs_dev_from_median"
     if "ratio_surrogate" in tl and tl["ratio_surrogate"] is not None:
         v = _as_float(tl["ratio_surrogate"])
         # Empty ratio_samples force the optimizer to report 0 — treat as missing.
@@ -242,14 +246,55 @@ def _ratio_loss_from_term_losses(
     return None, None
 
 
+def mean_abs_dev_from_median_shares(
+    *,
+    x: list[float] | Any,
+    ingredient_basis: list[str | None],
+    basis_samples: dict[str, Any],
+) -> float | None:
+    """Mean |mass_share − neighborhood_median| over mapped basis nodes (W1 to median)."""
+    try:
+        arr = np.asarray(x, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if arr.size == 0 or arr.sum() <= 0:
+        return None
+    total = float(arr.sum())
+    losses: list[float] = []
+    seen: set[str] = set()
+    for i, nid in enumerate(ingredient_basis):
+        if not nid or nid in seen or i >= arr.size:
+            continue
+        samples_raw = basis_samples.get(nid)
+        if samples_raw is None or isinstance(samples_raw, str):
+            continue
+        try:
+            samples = np.asarray(samples_raw, dtype=float)
+        except (TypeError, ValueError):
+            continue
+        if samples.size == 0:
+            continue
+        seen.add(str(nid))
+        grams = float(
+            sum(float(arr[j]) for j, n2 in enumerate(ingredient_basis) if n2 == nid and j < arr.size)
+        )
+        z = grams / total
+        med = float(np.median(samples))
+        losses.append(abs(z - med))
+    if not losses:
+        return None
+    return float(np.mean(losses))
+
+
 def extract_ratio_and_nutrient(
     payload: dict[str, Any],
 ) -> tuple[float | None, str | None, float | None, str | None]:
     """Authoritative ratio + nutrient from the chosen recipe context."""
     ctx = resolve_chosen_context(payload)
     opt = ctx["opt"]
+    problem = ctx.get("problem") or {}
     tl = opt.get("term_losses") if isinstance(opt, dict) else None
-    raw_rs = (ctx.get("problem") or {}).get("ratio_samples")
+    raw_rs = problem.get("ratio_samples")
     if isinstance(raw_rs, str) or raw_rs is None:
         # Artifact omission sentinel (e.g. "<omitted shape=list[0]>") or missing.
         ratio_n = 0
@@ -258,13 +303,36 @@ def extract_ratio_and_nutrient(
             ratio_n = len(raw_rs)
         except TypeError:
             ratio_n = 0
-    ratio, ratio_src = _ratio_loss_from_term_losses(tl, ratio_samples_n=ratio_n)
+
+    # Prefer recompute of median-centered share deviation when samples are present.
+    ratio: float | None = None
+    ratio_src: str | None = None
+    samples = problem.get("basis_samples")
+    x_opt = (opt or {}).get("x_opt") if isinstance(opt, dict) else None
+    basis = problem.get("ingredient_basis")
+    if isinstance(samples, dict) and x_opt is not None and isinstance(basis, list):
+        med_loss = mean_abs_dev_from_median_shares(
+            x=x_opt,
+            ingredient_basis=list(basis),
+            basis_samples=samples,
+        )
+        if med_loss is not None:
+            ratio, ratio_src = med_loss, "mean_abs_dev_from_median"
+
+    if ratio is None:
+        ratio, ratio_src = _ratio_loss_from_term_losses(tl, ratio_samples_n=ratio_n)
     # Fallback: sum of per-basis share losses (still a fidelity / ratio-family signal)
     if ratio is None and isinstance(tl, dict):
         share_parts = []
         for k, v in tl.items():
             ks = str(k)
-            if ks.endswith("__share") or ks in {"ratio_surrogate", "ratio_value", "ratio_loss", "ratio"}:
+            if ks.endswith("__share") or ks.endswith("__abs_dev_median") or ks in {
+                "ratio_surrogate",
+                "ratio_value",
+                "ratio_loss",
+                "ratio",
+                "mean_abs_dev_from_median",
+            }:
                 continue
             fv = _as_float(v)
             if fv is not None:
@@ -286,7 +354,12 @@ def extract_ratio_and_nutrient(
     # Telemetry fallback only when marked as coming from ratio_surrogate (not share sums).
     if ratio is None:
         tel = payload.get("run_telemetry") or {}
-        if tel.get("final_ratio_source") in {"ratio_surrogate", "ratio_loss", "ratio"}:
+        if tel.get("final_ratio_source") in {
+            "ratio_surrogate",
+            "ratio_loss",
+            "ratio",
+            "mean_abs_dev_from_median",
+        }:
             tr = _as_float(tel.get("final_ratio_term"))
             if tr is not None:
                 ratio, ratio_src = tr, f"telemetry_{tel.get('final_ratio_source')}"

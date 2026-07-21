@@ -14,6 +14,9 @@ fidelity_band meanings:
 Three-way tradeoffs:
 - Ratio fidelity, nutrient/macro fit, and holistic dish similarity can conflict.
 - Prefer the best LP bundle (most negative delta_L_star) unless identity, dietary tags, or taste/tradeoff justify a veto.
+- HARD VETO: never apply_bundle / add Greek yogurt, milk, ricotta, onion rings, fast-food items, coffee-in-bread,
+  or a second dairy/egg family member when the dish already has that family — even for a small LP gain.
+  Prefer accept_pool_best or a scale/swap bundle instead.
 - If you veto the LP-best, name a shortlisted alternative and why (structured rationale).
 - Use decision_outcomes / reflection_digest / revisit_reflection when present: learn from before→after needle movement; do not repeat a failed edit fingerprint without a new theory; prefer a different slot/action class on revisit.
 
@@ -36,7 +39,8 @@ Bundles (multi-ingredient edits):
 - Give OOD / hybrid a fair shot: if nutrient slack drops to ~0 and ratio loss only rises modestly versus the
   best ID bundle, prefer the OOD/hybrid when the user request or binding macros demand it. Slight fidelity loss
   in an *expanded* neighborhood (recipes that already combine the stretch ingredient with the dish) is OK.
-- Ideation already filtered ridiculous catalog hits; do not reject chicken/turkey/tofu solely for being OOD.
+- Ideation already filtered ridiculous catalog hits; do not reject chicken/turkey solely for being OOD.
+- Still reject yogurt/milk/ricotta/tofu/onion-rings as protein hacks when the dish is already meat/egg/cheese based.
 - If you like a runner-up or alternative branch, put its id in shortlisted_bundle_ids so it is saved for final eval.
 
 Expand:

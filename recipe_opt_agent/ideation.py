@@ -50,9 +50,17 @@ Rules:
    pantry pile-on. Propose at most ONE new OOD ingredient across all ideas
    (variants of the same ingredient are fine).
 9. Do not add an ingredient whose culinary family is already well represented
-   (e.g. no ricotta or milk into a dish already rich in cheese and egg — that
-   flattens the flavor profile and hurts the dish more than the macros gain).
+   (e.g. no ricotta, milk, or Greek yogurt into a dish already rich in cheese and egg —
+   that flattens the flavor profile and hurts the dish more than the macros gain).
    A macro gap is better closed by scaling or one distinct lean ingredient.
+10. HIGH-PROTEIN PLAYBOOK (when the macro box needs more protein):
+    (a) First propose swap/scale of existing meat, egg, or legume lines toward leaner
+        or higher-protein cuts already in the dish (or attested in the neighborhood).
+    (b) Only then propose ONE OOD lean animal protein that co-occurs with the dish's
+        anchors (e.g. chicken breast with pasta/rice), with dish_structure + search queries.
+    (c) Never close a protein gap with yogurt, milk, ricotta, tofu, whey, or fried snacks
+        when the dish is already savory meat/egg/cheese based.
+    (d) Never ground "onion" to onion rings / fast-food items; never add coffee to bread.
 
 Return ONLY JSON:
 {

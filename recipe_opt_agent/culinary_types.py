@@ -54,11 +54,31 @@ CULINARY_FAMILIES: dict[str, tuple[str, ...]] = {
     "curry": ("curry powder", "curry paste"),
     "bread": ("white bread", "wheat bread", "sandwich bread", " bread"),
     "egg": ("egg white", "egg yolk", "whole egg", " egg"),
-    "onion": ("onion", "onions", "shallot"),
+    "onion_rings": (
+        "onion ring",
+        "onion rings",
+        "fast foods, onion",
+    ),
+    "onion": ("onion", "onions", "shallot", "scallion"),
     "flour": ("bread flour", "wheat flour", "all-purpose flour", " flour"),
     "yeast": ("active dry yeast", "instant yeast", "yeast"),
-    "coffee": ("brewed coffee", "coffee", "espresso"),
-    "cheese": ("blue cheese", "cheddar", "mozzarella", "parmesan", "cheese"),
+    "coffee": ("brewed coffee", "coffee, brewed", "coffee", "espresso"),
+    "cheese": (
+        "blue cheese",
+        "cheddar",
+        "mozzarella",
+        "parmesan",
+        "pecorino",
+        "feta",
+        "ricotta",
+        "cheese",
+    ),
+    "yogurt": ("greek yogurt", "greek yoghurt", "yogurt", "yoghurt"),
+    "cream": ("heavy cream", "sour cream", "whipping cream", "cream,"),
+    "tofu": ("tofu", "bean curd"),
+    "chicken": ("chicken breast", "chicken thigh", "chicken,"),
+    "beef": ("beef,", "beef brisket", "beef chuck", "steak"),
+    "pork": ("pork loin", "pork shoulder", "pork tenderloin", "guanciale", "pancetta", "bacon"),
 }
 
 # Pairs that must never match even if tokens overlap.
@@ -75,6 +95,14 @@ CONFLICTING_FAMILIES: set[tuple[str, str]] = {
     ("tomato", "turkey"),
     ("salt", "butter"),
     ("butter", "salt"),
+    ("onion", "onion_rings"),
+    ("onion_rings", "onion"),
+    ("yeast", "coffee"),
+    ("coffee", "yeast"),
+    ("flour", "coffee"),
+    ("coffee", "flour"),
+    ("bread", "coffee"),
+    ("coffee", "bread"),
 }
 
 
@@ -86,6 +114,7 @@ def families_for_text(text: str) -> set[str]:
     priority = [
         "dessert_dairy",
         "fruit_butter",
+        "onion_rings",
         "bbq_sauce",
         "soy_sauce",
         "pork_rib",
@@ -97,12 +126,18 @@ def families_for_text(text: str) -> set[str]:
         "tomato",
         "wine",
         "rice",
+        "yogurt",
+        "cream",
+        "tofu",
         "milk",
         "butter",
         "salt",
         "curry",
         "bread",
         "egg",
+        "chicken",
+        "beef",
+        "pork",
         "onion",
         "flour",
         "yeast",
@@ -122,6 +157,9 @@ def families_for_text(text: str) -> set[str]:
                     continue
                 # Avoid fruit butter as butter
                 if fam == "butter" and "fruit" in raw and "butter" in raw:
+                    continue
+                # Plain onion must not also claim onion_rings hits
+                if fam == "onion" and any(x in raw for x in ("onion ring", "onion rings", "fast foods")):
                     continue
                 hit.add(fam)
                 break

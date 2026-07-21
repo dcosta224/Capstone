@@ -176,11 +176,43 @@ def build_final_eval_briefing(
         for k in ("protein_min", "protein_max", "carb_min", "carb_max", "fat_min", "fat_max")
     }
 
-    hull_ctx = (
+    hull_ctx = dict(
         problem.get("neighborhood_hull_context")
         or state.get("neighborhood_hull_context")
         or {}
     )
+    # Suite A / creative paths sometimes omit stretch; infer from macro gap vs neighborhood mean.
+    if not hull_ctx.get("target_stretch_level") or hull_ctx.get("error"):
+        hull_ctx = dict(hull_ctx)
+        mean_pfc = (
+            problem.get("neighborhood_mean_pfc")
+            or (problem.get("macro_target_meta") or {}).get("neighborhood_mean_pfc")
+            or {}
+        )
+        try:
+            p_lo = float(box.get("protein_min") or 0.0)
+            p_mean = float(mean_pfc.get("protein") or 0.0)
+            delta = p_lo - p_mean if p_mean > 0 else None
+        except (TypeError, ValueError):
+            delta = None
+        if delta is None:
+            # No neighborhood mean available: treat aggressive protein floors as outside_hull.
+            if p_lo >= 0.28:
+                level, forg, delta = "outside_hull", 0.30, p_lo
+            elif p_lo >= 0.22:
+                level, forg, delta = "edge", 0.15, p_lo
+            else:
+                level, forg, delta = "in_hull", 0.0, p_lo
+        elif delta >= 0.08:
+            level, forg = "outside_hull", 0.30
+        elif delta >= 0.04:
+            level, forg = "edge", 0.15
+        else:
+            level, forg = "in_hull", 0.0
+        hull_ctx.setdefault("target_stretch_level", level)
+        hull_ctx.setdefault("fidelity_forgiveness_hint", forg)
+        hull_ctx["stretch_inferred_from"] = "protein_box_vs_neighborhood_mean"
+        hull_ctx["protein_delta_vs_mean"] = delta
 
     return {
         "title": state.get("title"),
@@ -193,6 +225,11 @@ def build_final_eval_briefing(
             "target_stretch_level": hull_ctx.get("target_stretch_level"),
             "frac_neighbor_hulls_intersecting_target": hull_ctx.get("frac_hull_intersects"),
             "median_neighbor_outside_score": hull_ctx.get("median_outside_score"),
+            "stretch_note": (
+                "Interpret ratio/IQR losses WITH this stretch level. "
+                "outside_hull allows modest plausible_extension (e.g. lean poultry) but still "
+                "penalize clash ingredients (yogurt/milk/ricotta stacks, onion rings, coffee-in-bread)."
+            ),
         },
         "final_recipe": {
             "source": chosen.get("source"),

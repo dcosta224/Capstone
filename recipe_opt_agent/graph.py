@@ -583,7 +583,9 @@ def _filter_candidates(
     critical: set[str],
     tags: list[RequirementTag],
     problem: dict[str, Any] | None = None,
+    title: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from recipe_opt_agent.clash_gates import filter_candidates_by_clash_gates
     from recipe_opt_agent.edit_grounding import filter_candidates_by_neighborhood_support
 
     filtered: list[dict[str, Any]] = []
@@ -599,6 +601,10 @@ def _filter_candidates(
     if tags:
         filtered, tag_dropped = filter_candidates_by_tags(filtered, tags)
         dropped.extend(tag_dropped)
+    filtered, clash_dropped = filter_candidates_by_clash_gates(
+        filtered, problem=problem, title=title
+    )
+    dropped.extend(clash_dropped)
     filtered, nb_dropped = filter_candidates_by_neighborhood_support(
         filtered, problem=problem
     )
@@ -812,11 +818,15 @@ def node_propose(state: AgentState) -> dict[str, Any]:
         ]
         per_slot[sid] = merged
 
-    # Filter each slot's candidates (identity + tags + neighborhood attestation).
+    # Filter each slot's candidates (identity + tags + clash + neighborhood attestation).
     dropped: list[dict[str, Any]] = []
     for sid in list(per_slot.keys()):
         kept, slot_dropped = _filter_candidates(
-            per_slot[sid], critical=critical, tags=tags, problem=problem
+            per_slot[sid],
+            critical=critical,
+            tags=tags,
+            problem=problem,
+            title=state.get("title"),
         )
         per_slot[sid] = kept
         dropped.extend(slot_dropped)
@@ -1158,6 +1168,17 @@ def node_decide(state: AgentState) -> dict[str, Any]:
             passes_tags_fn=_bundle_ok,
             ood_delta_handicap=float(getattr(cfg, "ood_delta_handicap", 0.015) or 0.0),
         )
+        # Never auto-apply a clash ingredient for a tiny LP gain.
+        if favorite is not None:
+            from recipe_opt_agent.clash_gates import bundle_clash_detail
+
+            clashes = bundle_clash_detail(
+                favorite,
+                problem=state.get("problem"),
+                title=state.get("title"),
+            )
+            if clashes:
+                favorite = None
 
     decide_mode = "llm_mini"
     llm_trace: dict[str, Any] = {}
@@ -1226,6 +1247,87 @@ def node_decide(state: AgentState) -> dict[str, Any]:
                 ),
                 "add_budget_veto": True,
             }
+        # Identity clash veto: reject apply_bundle / add that introduce denylist or
+        # family-stack clashes unless nutrient slack improvement is large.
+        if decision.get("action") in {"apply_bundle", "add"} and not decision.get("add_budget_veto"):
+            from recipe_opt_agent.clash_gates import bundle_clash_detail, clash_reason_for_label
+
+            clash_hits: list[dict[str, Any]] = []
+            if decision.get("action") == "apply_bundle":
+                chosen_b = next(
+                    (
+                        b
+                        for b in (state.get("bundles") or [])
+                        if str(b.get("bundle_id")) == str(decision.get("chosen_bundle_id"))
+                    ),
+                    None,
+                )
+                clash_hits = bundle_clash_detail(
+                    chosen_b,
+                    problem=state.get("problem"),
+                    title=state.get("title"),
+                )
+                nutrient_delta = None
+                if chosen_b is not None:
+                    try:
+                        nutrient_delta = -float(chosen_b.get("delta_L_star") or 0.0)
+                    except (TypeError, ValueError):
+                        nutrient_delta = None
+                # Only allow clash if the bundle clearly fixes a large loss (≥0.05).
+                allow = nutrient_delta is not None and nutrient_delta >= 0.05
+                # Denylist never allowed.
+                if any(str(h.get("detail") or "").startswith("denylist") for h in clash_hits):
+                    allow = False
+                if clash_hits and not allow:
+                    decision = {
+                        **decision,
+                        "action": "accept_pool_best"
+                        if (state.get("candidate_pool") or [])
+                        else "accept",
+                        "chosen_candidate_id": None,
+                        "chosen_bundle_id": None,
+                        "rationale": (
+                            "Clash veto: edits "
+                            + ", ".join(
+                                f"{h.get('label')} ({h.get('detail')})" for h in clash_hits[:3]
+                            )
+                            + f" not justified by LP gain. Original: {decision.get('rationale')}"
+                        ),
+                        "clash_veto": True,
+                        "clash_details": clash_hits,
+                    }
+            elif decision.get("action") == "add":
+                # Direct add action — check label if present on decision.
+                add_label = str(
+                    decision.get("add_label")
+                    or ((decision.get("identity") or {}).get("role_change"))
+                    or ""
+                )
+                reason = clash_reason_for_label(
+                    add_label,
+                    current_labels=[
+                        str(r.get("label") or "")
+                        for r in (
+                            ((state.get("problem") or {}).get("chosen_recipe") or {}).get(
+                                "ingredients"
+                            )
+                            or []
+                        )
+                    ],
+                    title=state.get("title"),
+                )
+                if reason and str(reason).startswith("denylist"):
+                    decision = {
+                        **decision,
+                        "action": "accept_pool_best"
+                        if (state.get("candidate_pool") or [])
+                        else "accept",
+                        "rationale": (
+                            f"Clash veto on add {add_label!r}: {reason}. "
+                            f"Original: {decision.get('rationale')}"
+                        ),
+                        "clash_veto": True,
+                    }
         tools_used = [
             {
                 "name": "decide_action_llm",

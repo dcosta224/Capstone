@@ -69,6 +69,9 @@ def filter_candidates_by_neighborhood_support(
     min_score: float = 0.35,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Drop add/swap candidates whose labels are not neighborhood-attested."""
+    from recipe_opt_agent.clash_gates import is_denylist_label
+    from recipe_opt_agent.culinary_types import CONFLICTING_FAMILIES
+
     kept: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     for c in candidates:
@@ -84,10 +87,43 @@ def filter_candidates_by_neighborhood_support(
             kept.append(c)
             continue
         label = str(c.get("label") or c.get("name") or "")
+        denied, deny_detail = is_denylist_label(label)
+        if denied:
+            dropped.append(
+                {
+                    "candidate": c,
+                    "reason": "denylist_label",
+                    "detail": deny_detail,
+                }
+            )
+            continue
         ok, reason = label_supported_by_neighborhood(
             label, problem=problem, min_score=min_score
         )
         if ok:
+            # Extra guard: ideation "onion" must not ground to onion rings even if
+            # a fuzzy catalog score somehow passes family checks.
+            idea = str(meta.get("idea_ingredient") or meta.get("query") or "")
+            if idea:
+                q_fam = families_for_text(idea)
+                l_fam = families_for_text(label)
+                blocked = False
+                for q in q_fam:
+                    for lab in l_fam:
+                        if (q, lab) in CONFLICTING_FAMILIES:
+                            blocked = True
+                            break
+                    if blocked:
+                        break
+                if blocked:
+                    dropped.append(
+                        {
+                            "candidate": c,
+                            "reason": "family_conflict_grounding",
+                            "detail": f"idea={idea!r} → label={label!r}",
+                        }
+                    )
+                    continue
             kept.append({**c, "neighborhood_support": reason})
         else:
             dropped.append(

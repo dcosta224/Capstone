@@ -1022,4 +1022,16 @@ def load_canonical_problem(
         )
     except Exception as exc:
         problem["neighborhood_hull_context"] = {"error": str(exc), "n_recipes": 0}
+    try:
+        from recipe_opt_agent.macro_target_suggestions import _neighborhood_mean_pfc
+
+        mean_pfc = _neighborhood_mean_pfc(nb.lines_df)
+        if mean_pfc is not None:
+            problem["neighborhood_mean_pfc"] = {
+                "protein": float(mean_pfc[0]),
+                "carbs": float(mean_pfc[1]),
+                "fat": float(mean_pfc[2]),
+            }
+    except Exception:
+        pass
     return problem
