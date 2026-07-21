@@ -25,6 +25,9 @@ from mvp_corpus_cache import corpus_status, warm_mvp_corpus
 from mvp_nutrient_fit import clamp_fraction_bounds
 from mvp_pipeline import PipelineEvent, UserQuery, get_embedding_model
 
+from .auth import CognitoAuthStubMiddleware
+from .launch_ready import launch_status
+
 load_dotenv()
 
 
@@ -37,6 +40,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Recipe MVP", version="0.1.0", lifespan=lifespan)
+app.add_middleware(CognitoAuthStubMiddleware)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -100,12 +104,14 @@ def index():
 @app.get("/health")
 def health():
     cfg = AgentConfig.from_env()
+    launch = launch_status()
     return {
         "status": "ok",
         "agent_mode": "strands" if cfg.enabled else "legacy",
         "bedrock_model": cfg.bedrock_model_id,
         "bedrock": bedrock_status(),
         "cache": corpus_status(),
+        "launch": launch,
     }
 
 

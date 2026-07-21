@@ -3,9 +3,9 @@
 #
 # Usage:
 #   ./scripts/deploy/deploy_staging.sh                    # S3 artifacts only (no EC2)
-#   ./scripts/deploy/deploy_staging.sh --start-ec2        # also hydrate EC2 + restart app
-#   ./scripts/deploy/deploy_staging.sh --start-ec2 --full-data
-#   ./scripts/deploy/deploy_staging.sh --start-ec2 --stop-after
+#   ./scripts/deploy/deploy_staging.sh --start-ec2        # legacy: git+uv on EC2
+#   ./scripts/deploy/deploy_staging.sh --start-ec2 --ecr  # preferred: pull ECR image on EC2
+#   ./scripts/deploy/deploy_staging.sh --start-ec2 --ecr --stop-after
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +17,7 @@ FULL_DATA=false
 WITH_CACHE=false
 STOP_AFTER=false
 NO_PUSH=false
+USE_ECR=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -25,11 +26,13 @@ for arg in "$@"; do
     --with-cache) WITH_CACHE=true ;;
     --stop-after) STOP_AFTER=true ;;
     --no-push) NO_PUSH=true ;;
+    --ecr) USE_ECR=true ;;
     -h|--help)
       cat <<EOF
 Usage: $0 [options]
 
   --start-ec2     Start EC2 and run remote setup (compute charges)
+  --ecr           On EC2, pull/run Docker image from ECR (uses GitHub autopush)
   --full-data     Include Data/ in S3 sync
   --with-cache    Include mvp_web/cache/ in S3 sync
   --stop-after    Stop EC2 after successful health check
@@ -71,9 +74,17 @@ if [[ "$START_EC2" != true ]]; then
   exit 0
 fi
 
+if [[ "$USE_ECR" == true ]]; then
+  ECR_ARGS=(--start-ec2)
+  [[ "$STOP_AFTER" == true ]] && ECR_ARGS+=(--stop-after)
+  "${SCRIPT_DIR}/deploy_ecr_to_ec2.sh" "${ECR_ARGS[@]}"
+  msg "Deploy complete (ECR -> EC2)."
+  exit 0
+fi
+
 EBS_ARGS=(--start-ec2 --skip-s3-sync)
 
-# load_to_ebs has its own confirmation prompt
+# load_to_ebs has its own confirmation prompt (legacy git+uv path)
 export CAPSTONE_BRANCH="$BRANCH"
 "${SCRIPT_DIR}/load_to_ebs.sh" "${EBS_ARGS[@]}"
 

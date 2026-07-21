@@ -182,6 +182,15 @@ if [[ "$CREATE_EC2" == true ]]; then
       --policy-name "${PROJECT_PREFIX}-s3-read" \
       --policy-document "file://${POLICY_FILE}"
     rm -f "$POLICY_FILE"
+    ECR_POLICY_FILE="$(mktemp)"
+    sed -e "s/AWS_REGION/${AWS_REGION}/g" \
+        -e "s/AWS_ACCOUNT_ID/${ACCOUNT_ID}/g" \
+        -e "s/ECR_REPO/macroiq/g" \
+      "${INFRA_DIR}/iam-ec2-ecr-policy.json" >"$ECR_POLICY_FILE"
+    aws iam put-role-policy --role-name "$ROLE_NAME" \
+      --policy-name "${PROJECT_PREFIX}-ecr-pull" \
+      --policy-document "file://${ECR_POLICY_FILE}"
+    rm -f "$ECR_POLICY_FILE"
   fi
 
   if ! aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then
@@ -235,6 +244,9 @@ EC2_SSH_USER=ec2-user
 CAPSTONE_GIT_REPO=${GIT_REPO}
 CAPSTONE_BRANCH=${GIT_BRANCH}
 CAPSTONE_ROOT=/opt/capstone
+
+ECR_REPO=macroiq
+ECR_IMAGE_TAG=deployment
 EOF
 
 msg ""

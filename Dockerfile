@@ -10,7 +10,8 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never \
     HF_HOME=/app/.cache/huggingface
 
-COPY pyproject.toml uv.lock .python-version ./
+# .python-version is gitignored / often absent; image already pins Python 3.11.
+COPY pyproject.toml uv.lock ./
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project

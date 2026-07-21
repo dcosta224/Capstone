@@ -41,8 +41,8 @@ msg "EC2 state:    ${STATE}"
 if [[ "$STATE" == "running" ]]; then
   IP="$(ec2_public_ip)"
   msg "Public IP:    ${IP}"
-  msg "Staging URL:  http://${IP}:8000"
-  if curl -sf --max-time 5 "http://${IP}:8000/health" 2>/dev/null; then
+  msg "Staging URL:  http://${IP}  (map host :80 → container :8000)"
+  if curl -sf --max-time 5 "http://${IP}/health" 2>/dev/null; then
     msg "Health:       OK"
   else
     msg "Health:       not responding (app may still be starting)"

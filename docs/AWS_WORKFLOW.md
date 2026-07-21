@@ -3,6 +3,8 @@
 Local dev on your Mac; S3 for durable files; optional on-demand EC2 for staging demos.
 Supabase stays your shared database.
 
+**Container path (GitHub → ECR → EC2):** see **[ECR_EC2_DEPLOY.md](ECR_EC2_DEPLOY.md)** for the full write-up of automated image push and Docker-on-EC2 hosting.
+
 ## Cost cheat sheet
 
 | Action | EC2 runs? | Typical cost |
@@ -49,11 +51,34 @@ scp -i ~/.ssh/capstone-staging.pem .env ec2-user@<ip>:/opt/capstone/.env
 # After local testing — S3 only (safe, no EC2)
 ./scripts/deploy/deploy_staging.sh
 
-# Full staging demo (starts EC2)
+# Full staging demo (starts EC2) — legacy git+uv on the box
 ./scripts/deploy/deploy_staging.sh --start-ec2 --with-cache
+
+# Preferred: run the GitHub/ECR Docker image on EC2 (autopush -> pull -> restart)
+# Requires EC2 instance + IAM ECR pull (once): ./scripts/deploy/attach_ec2_ecr_iam.sh
+./scripts/deploy/deploy_ecr_to_ec2.sh --start-ec2
+# or: ./scripts/deploy/deploy_staging.sh --start-ec2 --ecr --stop-after
 
 # Check status
 ./scripts/deploy/status.sh
+```
+
+## ECR → EC2 (uses GitHub Actions image)
+
+GitHub Actions on `deployment` pushes `macroiq:deployment` to ECR. EC2 does **not** auto-pull on every push (avoids starting compute). When you want a demo:
+
+```bash
+# Once per AWS account/role (if EC2 was created before ECR wiring):
+./scripts/deploy/attach_ec2_ecr_iam.sh
+
+# Copy .env to the instance once (Supabase PG_* etc.):
+# scp -i ~/.ssh/capstone-staging.pem .env ec2-user@<ip>:/opt/capstone/.env
+
+# On for demo — starts EC2, docker pull, restart container
+./scripts/deploy/deploy_ecr_to_ec2.sh --start-ec2
+
+# Off — stop compute
+./scripts/deploy/stop_staging.sh
 ```
 
 ## Partner — three commands
@@ -79,7 +104,7 @@ aws login
 | **Git** | Code, notebooks tracked in repo, SQL |
 | **S3 raw** | `Data/` (USDA, RecipeNLG) |
 | **S3 artifacts** | `scratch/EDA/*.parquet`, feasibility reports, deploy manifest |
-| **EC2 EBS** | Clone of repo + synced S3 + `.venv` (built on Linux) |
+| **EC2 EBS** | Docker runtime + `.env`; pulls `macroiq` from ECR (legacy path: git clone + `.venv`) |
 | **Supabase** | `usda`, `recipe`, `resolved_recipes`, embeddings |
 | **Never S3** | `.env`, secrets |
 
