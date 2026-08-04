@@ -226,7 +226,11 @@ def iqr_zone(value: float, samples: np.ndarray, *, whisker: float = 1.5) -> tupl
     q25 = float(np.percentile(samples, 25))
     med = float(np.median(samples))
     q75 = float(np.percentile(samples, 75))
-    iqr = max(q75 - q25, 1e-9)
+    raw_iqr = float(q75) - float(q25)
+    # Degenerate / zero-width bands must not inflate L_norm or count as red.
+    if raw_iqr <= 1e-12 or raw_iqr / max(abs(med), abs(q25), abs(q75), 1e-9) <= 1e-6:
+        return Zone.GREEN, med, q25, q75, 0.0
+    iqr = raw_iqr
     L_norm = abs(value - med) / iqr
     lo = q25 - whisker * iqr
     hi = q75 + whisker * iqr

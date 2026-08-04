@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Agent vs GPT-5.5 evaluation suites (A/B/C) with resume + full disk persistence.
+"""Agent vs GPT-5.5 evaluation suites (A/B/C/D/E) with resume + full disk persistence.
 
 Suites
 ------
 A  Macro precision — high-protein ±2% box, creative_example agent
 B  Dietary hard constraints — explicit diet tags in the request
 C  Identity under stretch — high-protein box, creative_example agent
+D  Cookability under constraint — kitchen-plausible grams + staples under stretch
+E  Taste preference × macros — explicit taste ask + tight protein box
 
 Both systems get the same user request + macro box. GPT-5.5 is a one-shot
 structured draft (no tools). Shared gpt-5.5 judge. Win rules use nutrient loss,
-ratio loss, dietary safety, identity proxies, and holistic score.
+ratio loss, dietary safety, identity/cookability/taste proxies, and holistic score.
 
 Resume
 ------
@@ -23,6 +25,7 @@ Usage
 -----
   PYTHONPATH=scripts:. uv run python tests/run_agent_vs_gpt55_eval.py
   PYTHONPATH=scripts:. uv run python tests/run_agent_vs_gpt55_eval.py --suites A,B --max-iterations 2
+  PYTHONPATH=scripts:. uv run python tests/run_agent_vs_gpt55_eval.py --suites D,E
 """
 
 from __future__ import annotations
@@ -184,6 +187,318 @@ DIETARY_CASES: list[dict[str, Any]] = [
 ]
 
 
+# Suite D — cookability under constraint. Slide-ready hooks explain the story.
+COOKABILITY_CASES: list[dict[str, Any]] = [
+    {
+        "case_key": "hp_carbonara_cookable",
+        "title": "Carbonara",
+        "canonical_id": None,
+        "presentation_hook": (
+            "Slide: 'Would you cook this?' High-protein carbonara — frontier models "
+            "often dump soft dairy or absurd seasoning; agent must keep pasta/egg/cheese "
+            "with kitchen-scale grams."
+        ),
+        "request": (
+            "Higher-protein carbonara: about 28% protein, 40% carbs, 32% fat "
+            "(calorie shares). Keep it something I'd actually cook tonight — "
+            "realistic spice amounts, keep pasta, egg, and hard cheese."
+        ),
+        "tags": ["high_protein"],
+        "box": {
+            "protein_min": 0.26,
+            "protein_max": 0.30,
+            "carb_min": 0.38,
+            "carb_max": 0.42,
+            "fat_min": 0.30,
+            "fat_max": 0.34,
+        },
+        "agent_mode_name": "creative",
+        "identity_staples": ["pasta", "egg", "cheese"],
+    },
+    {
+        "case_key": "hp_focaccia_cookable",
+        "title": "Focaccia",
+        "canonical_id": 187,
+        "presentation_hook": (
+            "Slide: Coffee-in-bread / 70g yeast dumps. High-protein focaccia must stay "
+            "olive-oil bread with cookable dough quantities."
+        ),
+        "request": (
+            "Higher-protein focaccia hitting the macro box. Keep olive-oil bread identity. "
+            "Something I'd bake tonight — no weird add-ins, realistic yeast/salt/herb grams."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+        "identity_staples": ["flour", "oil", "yeast"],
+    },
+    {
+        "case_key": "hp_avgolemono_cookable",
+        "title": "Avgolemono Soup",
+        "canonical_id": 30,
+        "presentation_hook": (
+            "Slide: Herb powder by the cup. High-protein avgolemono must stay egg-lemon "
+            "soup with spoonable seasoning, not 100g dill."
+        ),
+        "request": (
+            "Higher-protein avgolemono (egg-lemon chicken soup) hitting the macro box. "
+            "Keep it cookable — normal herb/spice amounts, keep egg and lemon character."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+        "identity_staples": ["egg", "lemon", "chicken"],
+    },
+    {
+        "case_key": "hp_bbq_ribs_cookable",
+        "title": "BBQ Ribs",
+        "canonical_id": 35,
+        "presentation_hook": (
+            "Slide: Rub as the main ingredient. High-protein BBQ ribs — agent should "
+            "scale meat, not dump 80g onion powder."
+        ),
+        "request": (
+            "Higher-protein BBQ ribs hitting the macro box. Keep smoked-rib identity. "
+            "Cookable tonight — meat is the star; rub/spice in tablespoons not cups."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+        "identity_staples": ["pork", "rib", "meat"],
+        "require_protein_line": True,
+    },
+    {
+        "case_key": "no_pork_ribs_cookable",
+        "title": "BBQ Ribs",
+        "canonical_id": 35,
+        "presentation_hook": (
+            "Slide: Diet swap that forgets protein. No-pork BBQ ribs must still have a "
+            "real meat/protein line — not sauce + spices alone."
+        ),
+        "request": (
+            "Higher-protein BBQ-style ribs without pork: use beef or poultry. No pork. "
+            "Hit the macro box. Keep it cookable with a clear protein centerpiece."
+        ),
+        "tags": ["no_pork", "high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative",
+        "require_protein_line": True,
+        "identity_staples": ["meat", "rib", "beef", "chicken", "turkey"],
+    },
+    {
+        "case_key": "gf_focaccia_cookable",
+        "title": "Focaccia",
+        "canonical_id": 187,
+        "presentation_hook": (
+            "Slide: Gluten-free bread missing flour. GF focaccia must still be a dough "
+            "(flour alternative present), not oil + salt."
+        ),
+        "request": (
+            "Gluten-free focaccia hitting about 18% protein / 40% carbs / 42% fat. "
+            "No wheat/gluten. Keep olive-oil bread identity with a real flour base I'd bake."
+        ),
+        "tags": ["gluten_free"],
+        "box": {
+            "protein_min": 0.16,
+            "protein_max": 0.20,
+            "carb_min": 0.38,
+            "carb_max": 0.42,
+            "fat_min": 0.40,
+            "fat_max": 0.44,
+        },
+        "agent_mode_name": "creative",
+        "identity_staples": ["flour", "starch", "rice flour", "almond", "oil"],
+    },
+    {
+        "case_key": "hp_bourguignon_cookable",
+        "title": "Beef Bourguignon",
+        "canonical_id": 51,
+        "presentation_hook": (
+            "Slide: Stew you can ladle. High-protein bourguignon — wine braise with "
+            "meat + veg at stew scales, not spice as bulk."
+        ),
+        "request": (
+            "Higher-protein beef bourguignon hitting the macro box. Keep wine-braise stew "
+            "identity. Cookable — realistic salt/herb grams; beef and vegetables dominate mass."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+        "require_protein_line": True,
+        "identity_staples": ["beef", "wine", "onion"],
+    },
+    {
+        "case_key": "no_beef_bourguignon_cookable",
+        "title": "Beef Bourguignon",
+        "canonical_id": 51,
+        "presentation_hook": (
+            "Slide: 'No beef' that forgot the protein. Swap must still put poultry/lamb "
+            "on the plate at stew scale."
+        ),
+        "request": (
+            "Higher-protein bourguignon-style stew without beef — use poultry or lamb. "
+            "No beef. Hit macros. Keep wine-braise identity with a real protein centerpiece."
+        ),
+        "tags": ["no_beef", "high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative",
+        "require_protein_line": True,
+        "identity_staples": ["chicken", "turkey", "lamb", "meat", "wine"],
+    },
+]
+
+
+# Suite E — taste preference × macros. One crisp taste ask per slide + protein box.
+TASTE_MACRO_CASES: list[dict[str, Any]] = [
+    {
+        "case_key": "focaccia_lighter",
+        "title": "Focaccia",
+        "canonical_id": 187,
+        "presentation_hook": (
+            "Slide: Taste = lighter/less oily + still hit protein. Can the system "
+            "honor 'less rich' without wrecking bread identity or the macro box?"
+        ),
+        "taste_preference": "lighter and less oily / less rich mouthfeel",
+        "request": (
+            "Higher-protein focaccia hitting the macro box, but make it lighter and less "
+            "oily than a typical bakery focaccia — less rich mouthfeel while staying "
+            "recognizable olive-oil bread."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+    },
+    {
+        "case_key": "bbq_ribs_smokier",
+        "title": "BBQ Ribs",
+        "canonical_id": 35,
+        "presentation_hook": (
+            "Slide: Taste = smokier BBQ + high protein. Preference must show up as "
+            "smoke/char profile — not a cup of paprika."
+        ),
+        "taste_preference": "smokier / more smoked-char flavor",
+        "request": (
+            "Higher-protein BBQ ribs hitting the macro box. Make them smokier — more "
+            "smoked-char flavor — while keeping cookable rub amounts and rib identity."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+    },
+    {
+        "case_key": "avgolemono_brighter",
+        "title": "Avgolemono Soup",
+        "canonical_id": 30,
+        "presentation_hook": (
+            "Slide: Taste = brighter lemon + high protein. Classic 'more lemon/herb' "
+            "ask without turning the pot into dried dill."
+        ),
+        "taste_preference": "brighter, more lemon-forward",
+        "request": (
+            "Higher-protein avgolemono hitting the macro box. Make it brighter and more "
+            "lemon-forward while keeping egg-lemon soup identity and normal herb amounts."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+    },
+    {
+        "case_key": "bourguignon_weeknight",
+        "title": "Beef Bourguignon",
+        "canonical_id": 51,
+        "presentation_hook": (
+            "Slide: Taste/lifestyle = weeknight-simpler stew + protein target. "
+            "Fewer specialty extras; still wine-braise and on-box."
+        ),
+        "taste_preference": "weeknight-simpler / pantry-leaner",
+        "request": (
+            "Higher-protein beef bourguignon hitting the macro box. Make it weeknight-"
+            "simpler and pantry-leaner — fewer specialty extras — while keeping wine-braise "
+            "stew identity."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+    },
+    {
+        "case_key": "grape_leaves_less_oily",
+        "title": "Stuffed Grape Leaves",
+        "canonical_id": 449,
+        "presentation_hook": (
+            "Slide: Taste = less oily, brighter herb + protein. Common healthy-taste "
+            "ask on a rich stuffed dish."
+        ),
+        "taste_preference": "less oily, brighter herb",
+        "request": (
+            "Higher-protein stuffed grape leaves hitting the macro box. Make them less "
+            "oily and brighter/herb-forward while keeping dolma identity."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+    },
+    {
+        "case_key": "al_pastor_milder",
+        "title": "Al Pastor",
+        "canonical_id": 10,
+        "presentation_hook": (
+            "Slide: Taste = milder heat, keep pineapple-chili. Preference without "
+            "erasing identity or missing protein."
+        ),
+        "taste_preference": "milder heat; keep chili-pineapple",
+        "request": (
+            "Higher-protein al pastor hitting the macro box. Make the heat milder for "
+            "family dinner, but keep the chili-pineapple profile recognizable."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+    },
+    {
+        "case_key": "carbonara_lighter",
+        "title": "Carbonara",
+        "canonical_id": None,
+        "presentation_hook": (
+            "Slide: Taste = lighter carbonara + protein — NOT yogurt/ricotta hacks. "
+            "Tests clash gates vs soft-dairy protein cheats."
+        ),
+        "taste_preference": "lighter, less heavy; not cream-sauce-like",
+        "request": (
+            "Higher-protein carbonara: about 28% protein, 40% carbs, 32% fat. Make it "
+            "feel lighter and less heavy — not cream-sauce-like — while keeping pasta, "
+            "egg, and hard cheese. No yogurt/ricotta protein hacks."
+        ),
+        "tags": ["high_protein"],
+        "box": {
+            "protein_min": 0.26,
+            "protein_max": 0.30,
+            "carb_min": 0.38,
+            "carb_max": 0.42,
+            "fat_min": 0.30,
+            "fat_max": 0.34,
+        },
+        "agent_mode_name": "creative",
+    },
+    {
+        "case_key": "fried_rice_garlicky",
+        "title": "Fried Rice",
+        "canonical_id": 193,
+        "presentation_hook": (
+            "Slide: Taste = more garlicky/aromatic + protein. Everyday preference "
+            "language users actually type."
+        ),
+        "taste_preference": "more garlicky / aromatic",
+        "request": (
+            "Higher-protein fried rice hitting the macro box. Make it more garlicky and "
+            "aromatic while keeping fried-rice identity and cookable seasoning amounts."
+        ),
+        "tags": ["high_protein"],
+        "use_high_protein_from_neighborhood": True,
+        "agent_mode_name": "creative_example",
+    },
+]
+
+
 def _load_dotenv() -> None:
     env_path = ROOT / ".env"
     if not env_path.exists():
@@ -229,7 +544,154 @@ def _user_request_high_protein(title: str, box: dict[str, float]) -> str:
     )
 
 
-def _extract_needle_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+_SEASONING_TOKENS = (
+    "powder",
+    "spice",
+    "spices",
+    "seasoning",
+    "cumin",
+    "paprika",
+    "chili powder",
+    "onion powder",
+    "garlic powder",
+    "yeast",
+    "extract",
+    "dill weed",
+    "oregano",
+    "thyme, dried",
+    "basil, dried",
+    "pepper, red or cayenne",
+    "curry powder",
+    "mustard powder",
+)
+_PROTEIN_TOKENS = (
+    "chicken",
+    "turkey",
+    "beef",
+    "pork",
+    "lamb",
+    "fish",
+    "salmon",
+    "tuna",
+    "shrimp",
+    "tofu",
+    "tempeh",
+    "egg",
+    "meat",
+    "rib",
+    "steak",
+    "thigh",
+    "breast",
+    "bean",
+    "lentil",
+    "chickpea",
+)
+
+
+def _cookability_metrics(
+    payload: dict[str, Any],
+    *,
+    case: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deterministic kitchen-plausibility checks for Suite D (and as soft context elsewhere)."""
+    ings = list(
+        (payload.get("chosen_recipe") or {}).get("ingredients")
+        or (payload.get("problem") or {}).get("chosen_recipe", {}).get("ingredients")
+        or []
+    )
+    total = 0.0
+    nonsense: list[dict[str, Any]] = []
+    token_staples: list[dict[str, Any]] = []
+    for row in ings:
+        label = str(row.get("label") or row.get("name") or "").strip()
+        try:
+            grams = float(row.get("grams") or 0.0)
+        except (TypeError, ValueError):
+            grams = 0.0
+        if grams < 0:
+            grams = 0.0
+        total += grams
+        low = label.lower()
+        is_seasoning = any(tok in low for tok in _SEASONING_TOKENS)
+        if is_seasoning and (grams > 25.0 or (total > 0 and grams / max(total, 1e-9) > 0.05 and grams > 15.0)):
+            nonsense.append({"label": label, "grams": grams})
+        if 0 < grams < 1.0 and not is_seasoning:
+            # Tiny non-seasoning lines look like optimizer tokens / dropped staples.
+            token_staples.append({"label": label, "grams": grams})
+
+    protein_lines = []
+    for row in ings:
+        label = str(row.get("label") or row.get("name") or "").lower()
+        try:
+            grams = float(row.get("grams") or 0.0)
+        except (TypeError, ValueError):
+            grams = 0.0
+        if grams >= 20.0 and any(tok in label for tok in _PROTEIN_TOKENS):
+            protein_lines.append({"label": row.get("label") or row.get("name"), "grams": grams})
+
+    require_protein = bool((case or {}).get("require_protein_line"))
+    missing_protein = require_protein and not protein_lines
+
+    # Identity staples: at least one token match with >= 15g when listed on the case.
+    staple_misses: list[str] = []
+    for staple in (case or {}).get("identity_staples") or []:
+        tok = str(staple).lower()
+        hit = False
+        for row in ings:
+            label = str(row.get("label") or row.get("name") or "").lower()
+            try:
+                grams = float(row.get("grams") or 0.0)
+            except (TypeError, ValueError):
+                grams = 0.0
+            if tok in label and grams >= 15.0:
+                hit = True
+                break
+        if not hit:
+            staple_misses.append(str(staple))
+
+    cookability_fail = bool(nonsense) or missing_protein or bool(staple_misses)
+    # Soft score: 0 = clean, higher = worse (for lower-better dims).
+    cookability_badness = (
+        float(len(nonsense))
+        + (2.0 if missing_protein else 0.0)
+        + 0.5 * float(len(staple_misses))
+        + 0.25 * float(len(token_staples))
+    )
+    return {
+        "nonsense_seasoning_flag": bool(nonsense),
+        "nonsense_seasonings": nonsense,
+        "token_staple_flag": bool(token_staples),
+        "token_staples": token_staples[:8],
+        "missing_protein_under_diet": missing_protein,
+        "protein_lines": protein_lines[:6],
+        "identity_staple_misses": staple_misses,
+        "cookability_fail": cookability_fail,
+        "cookability_badness": cookability_badness,
+    }
+
+
+def _taste_adherence_score(feval: dict[str, Any] | None) -> tuple[float | None, str | None]:
+    """Map judge taste_preference_met → numeric (higher better)."""
+    if not isinstance(feval, dict):
+        return None, None
+    raw = feval.get("taste_preference_met")
+    if raw is None:
+        return None, None
+    s = str(raw).strip().lower()
+    if s in {"yes", "true", "met"}:
+        return 1.0, s
+    if s in {"partially", "partial", "mostly"}:
+        return 0.5, s
+    if s in {"no", "false", "unmet"}:
+        return 0.0, s
+    return None, s
+
+
+def _extract_needle_metrics(
+    payload: dict[str, Any],
+    *,
+    case: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from recipe_opt_agent.score_display import extract_ratio_and_nutrient
 
     display = payload.get("display_scores") or {}
@@ -265,6 +727,8 @@ def _extract_needle_metrics(payload: dict[str, Any]) -> dict[str, Any]:
             holistic = None
 
     pfc = opt.get("pfc_after") or {}
+    cook = _cookability_metrics(payload, case=case)
+    taste_score, taste_raw = _taste_adherence_score(feval if isinstance(feval, dict) else None)
     return {
         "ratio_loss": ratio,
         "ratio_loss_source": ratio_src,
@@ -278,10 +742,13 @@ def _extract_needle_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         "strengths": feval.get("strengths"),
         "concerns": feval.get("concerns"),
         "judge_summary": feval.get("summary_markdown"),
+        "taste_preference_met": taste_raw,
+        "taste_adherence": taste_score,
         "labels": [
             str(i.get("label") or i.get("name") or "")
             for i in (payload.get("chosen_recipe") or {}).get("ingredients") or []
         ],
+        **cook,
     }
 
 
@@ -314,8 +781,16 @@ def decide_winner(
     *,
     box: dict[str, float],
     holistic_margin: float = 1.0,
+    suite: str | None = None,
 ) -> dict[str, Any]:
-    """Win if better on ≥2 of {macro, ratio, safety, identity} OR holistic edge without diet fail."""
+    """Win rules:
+
+    Default / A/B/C: ≥2 of {macro, ratio, safety, identity} OR holistic edge.
+    D: ≥2 of {macro, ratio, cookability, identity}; cookability veto if only
+       competitor fails kitchen-plausibility checks.
+    E: ≥2 of {macro, ratio, taste_adherence, cookability} (identity demoted —
+       taste preference is the user-facing dim).
+    """
 
     def _lower_better(a: float | None, b: float | None) -> str | None:
         if a is None and b is None:
@@ -355,7 +830,6 @@ def decide_winner(
     else:
         safety = "tie"
 
-    # Identity: fewer odd + fewer missing high-hit staples
     a_id = float(agent.get("n_odd_ingredients") or 0) + float(agent.get("n_missing_high_hit") or 0)
     c_id = float(competitor.get("n_odd_ingredients") or 0) + float(
         competitor.get("n_missing_high_hit") or 0
@@ -365,12 +839,46 @@ def decide_winner(
     else:
         identity = "agent" if a_id < c_id else "competitor"
 
-    dimensions = {
-        "macro_nutrient": macro,
-        "ratio_loss": ratio,
-        "safety_dietary": safety,
-        "identity": identity,
-    }
+    a_cook_fail = bool(agent.get("cookability_fail"))
+    c_cook_fail = bool(competitor.get("cookability_fail"))
+    if a_cook_fail != c_cook_fail:
+        cookability = "agent" if not a_cook_fail else "competitor"
+    else:
+        cookability = _lower_better(
+            agent.get("cookability_badness"), competitor.get("cookability_badness")
+        ) or "tie"
+
+    taste = _higher_better(agent.get("taste_adherence"), competitor.get("taste_adherence"))
+
+    suite_u = (suite or "").upper()
+    if suite_u == "D":
+        dimensions = {
+            "macro_nutrient": macro,
+            "ratio_loss": ratio,
+            "cookability": cookability,
+            "identity": identity,
+        }
+        dim_n = 4
+        dim_label = "macro/ratio/cookability/identity"
+    elif suite_u == "E":
+        dimensions = {
+            "macro_nutrient": macro,
+            "ratio_loss": ratio,
+            "taste_adherence": taste or "tie",
+            "cookability": cookability,
+        }
+        dim_n = 4
+        dim_label = "macro/ratio/taste/cookability"
+    else:
+        dimensions = {
+            "macro_nutrient": macro,
+            "ratio_loss": ratio,
+            "safety_dietary": safety,
+            "identity": identity,
+        }
+        dim_n = 4
+        dim_label = "macro/ratio/safety/identity"
+
     agent_dims = sum(1 for v in dimensions.values() if v == "agent")
     comp_dims = sum(1 for v in dimensions.values() if v == "competitor")
 
@@ -383,12 +891,17 @@ def decide_winner(
 
     winner = "tie"
     reason = "tied on structured dimensions"
-    if agent_dims >= 2 and agent_dims > comp_dims:
+
+    # Suite D hard trust veto: only competitor is uncookable → agent wins.
+    if suite_u == "D" and c_cook_fail and not a_cook_fail:
         winner = "agent"
-        reason = f"agent better on {agent_dims}/4 structured dims (incl. ratio_loss)"
+        reason = "competitor cookability_fail (kitchen-implausible) while agent is cookable"
+    elif agent_dims >= 2 and agent_dims > comp_dims:
+        winner = "agent"
+        reason = f"agent better on {agent_dims}/{dim_n} structured dims ({dim_label})"
     elif comp_dims >= 2 and comp_dims > agent_dims:
         winner = "competitor"
-        reason = f"competitor better on {comp_dims}/4 structured dims"
+        reason = f"competitor better on {comp_dims}/{dim_n} structured dims"
     elif hol_gap is not None and hol_gap >= holistic_margin and not a_vio:
         winner = "agent"
         reason = f"holistic margin {hol_gap:.1f} ≥ {holistic_margin} without dietary fail"
@@ -420,6 +933,25 @@ def decide_winner(
                 "otherwise sum of FoodOn mass-share fidelity losses. Explicit structured "
                 "win dimension alongside nutrient/macro fit."
             ),
+        },
+        "cookability_contextualizer": {
+            "agent_fail": a_cook_fail,
+            "competitor_fail": c_cook_fail,
+            "agent_badness": agent.get("cookability_badness"),
+            "competitor_badness": competitor.get("cookability_badness"),
+            "winner": cookability,
+            "note": (
+                "Cookability flags nonsense seasoning masses, missing protein centerpieces "
+                "on swap cases, and missing identity staples."
+            ),
+        },
+        "taste_contextualizer": {
+            "agent": agent.get("taste_adherence"),
+            "competitor": competitor.get("taste_adherence"),
+            "agent_raw": agent.get("taste_preference_met"),
+            "competitor_raw": competitor.get("taste_preference_met"),
+            "winner": taste,
+            "note": "Judge taste_preference_met mapped to yes=1 / partially=0.5 / no=0.",
         },
     }
 
@@ -547,6 +1079,65 @@ def _build_case_catalog(
             )
             picked += 1
 
+    def _expand_static_case(dc: dict[str, Any], *, suite: str, suite_name: str) -> dict[str, Any] | None:
+        cid = dc.get("canonical_id")
+        title = dc["title"]
+        box = dc.get("box")
+        mid = None
+        mean_pfc = None
+        req = dc["request"]
+        if dc.get("use_high_protein_from_neighborhood") and cid is not None:
+            hp = suggest_high_protein_targets_for_canonical(int(cid), pad_pct=2)
+            if not hp.get("error"):
+                box = hp["box"]
+                mid = hp["midpoint"]
+                mean_pfc = hp.get("neighborhood_mean_pfc")
+                # Keep the authored request (taste/cookability wording); only refresh
+                # mid-box numbers into a short prefix when useful.
+                p = 100.0 * 0.5 * (box["protein_min"] + box["protein_max"])
+                if "hitting the macro box" in req.lower() or "about" not in req.lower()[:80]:
+                    req = (
+                        f"{req} Target about {p:.0f}% protein calories "
+                        f"(±2% box from neighborhood stretch)."
+                    )
+        if box is None:
+            return None
+        out = {
+            "case_id": f"{suite}__{dc['case_key']}",
+            "suite": suite,
+            "suite_name": suite_name,
+            "title": title,
+            "canonical_id": cid,
+            "agent_mode_name": dc.get("agent_mode_name") or "creative",
+            "user_request": req,
+            "box": box,
+            "target_midpoint": mid,
+            "neighborhood_mean_pfc": mean_pfc,
+            "tags": list(dc.get("tags") or []),
+            "presentation_hook": dc.get("presentation_hook"),
+            "require_protein_line": bool(dc.get("require_protein_line")),
+            "identity_staples": list(dc.get("identity_staples") or []),
+        }
+        if dc.get("taste_preference"):
+            out["taste_preference"] = dc["taste_preference"]
+        return out
+
+    if "D" in suites:
+        for dc in COOKABILITY_CASES:
+            row = _expand_static_case(
+                dc, suite="D", suite_name="cookability_under_constraint"
+            )
+            if row:
+                cases.append(row)
+
+    if "E" in suites:
+        for dc in TASTE_MACRO_CASES:
+            row = _expand_static_case(
+                dc, suite="E", suite_name="taste_preference_with_macros"
+            )
+            if row:
+                cases.append(row)
+
     return cases
 
 
@@ -587,6 +1178,7 @@ def _prepare_agent_problem(case: dict[str, Any]) -> tuple[dict[str, Any], str]:
             recipe_ids=list(nb.recipe_ids),
             query=case["title"],
             target_mid=mid,
+            target_box=box,
         )
         problem = attach_example_recipe_to_problem(problem, example)
         mode = "creative"
@@ -757,6 +1349,8 @@ def run_competitor(
         problem["marginal_nodes"] = list(stub["marginal_nodes"])
     if stub.get("foodon_basis_report") and not problem.get("foodon_basis_report"):
         problem["foodon_basis_report"] = stub["foodon_basis_report"]
+    if stub.get("neighborhood_hull_context") and not problem.get("neighborhood_hull_context"):
+        problem["neighborhood_hull_context"] = stub["neighborhood_hull_context"]
     scored = _optimize_problem(problem, box)
     problem = scored["problem"]
     opt = scored["opt"]
@@ -773,6 +1367,7 @@ def run_competitor(
         "grounding_report": report.to_dict(),
         "requirement_tags": [t.to_dict() for t in tags],
         "foodon_basis_report": problem.get("foodon_basis_report"),
+        "taste_preference": case.get("taste_preference"),
     }
     payload["display_scores"] = build_display_scores(payload)
     # Attach dietary precheck into a mini final_evaluation even before LLM judge
@@ -782,8 +1377,16 @@ def run_competitor(
         "user_request": case["user_request"],
         "requirement_tags": [t.to_dict() for t in tags],
         "problem": problem,
-        "config": {},
+        "config": {
+            "protein_min": box["protein_min"],
+            "protein_max": box["protein_max"],
+            "carb_min": box["carb_min"],
+            "carb_max": box["carb_max"],
+            "fat_min": box["fat_min"],
+            "fat_max": box["fat_max"],
+        },
         "identity_roles": [],
+        "taste_preference": case.get("taste_preference"),
     }
     try:
         feval = evaluate_final_recipe(state, payload, model=DEFAULT_JUDGE_MODEL)
@@ -807,7 +1410,7 @@ def run_competitor(
         }
         payload["display_scores"] = display
 
-    metrics = _extract_needle_metrics(payload)
+    metrics = _extract_needle_metrics(payload, case=case)
     metrics["n_missing_high_hit"] = _missing_high_hit_count(payload)
     metrics["in_box"] = _in_box(metrics.get("pfc_after"), box)
     metrics["elapsed_s"] = round(time.perf_counter() - t0, 2)
@@ -839,6 +1442,8 @@ def run_agent_arm(
     box = case["box"]
     t0 = time.perf_counter()
     problem, agent_mode = _prepare_agent_problem(case)
+    if case.get("taste_preference"):
+        problem["taste_preference"] = case["taste_preference"]
     cfg = AgentConfig(
         protein_min=box["protein_min"],
         protein_max=box["protein_max"],
@@ -867,9 +1472,11 @@ def run_agent_arm(
             "suite": case["suite"],
             "macro_targets": box,
             "arm": "agent",
+            "taste_preference": case.get("taste_preference"),
+            "presentation_hook": case.get("presentation_hook"),
         },
     )
-    metrics = _extract_needle_metrics(result)
+    metrics = _extract_needle_metrics(result, case=case)
     metrics["n_missing_high_hit"] = _missing_high_hit_count(result)
     metrics["in_box"] = _in_box(metrics.get("pfc_after"), box)
     metrics["elapsed_s"] = round(time.perf_counter() - t0, 2)
@@ -1029,9 +1636,10 @@ def run_suite(
                 "max_iterations": max_iterations,
                 "n_cases": len(cases),
                 "win_rule": (
-                    "agent wins if better on ≥2 of {macro/nutrient, ratio_loss, dietary safety, "
-                    "identity} OR holistic margin ≥1 without dietary fail; "
-                    "ratio_loss is an explicit structured contextualizer"
+                    "A/B/C: ≥2 of {macro, ratio, safety, identity} OR holistic≥1; "
+                    "D: ≥2 of {macro, ratio, cookability, identity} OR competitor-only "
+                    "cookability_fail veto; E: ≥2 of {macro, ratio, taste, cookability}; "
+                    "ratio_loss always an explicit contextualizer"
                 ),
             },
         )
@@ -1101,6 +1709,7 @@ def run_suite(
                 agent_out["metrics"],
                 comp_out["metrics"],
                 box=case["box"],
+                suite=case.get("suite"),
             )
             print(
                 f"  → winner={winner['winner']} ({winner['reason']}) "
@@ -1171,8 +1780,9 @@ def run_suite(
         "aggregates": _aggregate(comparisons),
         "comparisons": comparisons,
         "win_rule": (
-            "agent wins if better on ≥2 of {macro/nutrient, ratio_loss, dietary safety, identity} "
-            "OR holistic margin ≥1 without dietary fail; ratio_loss is an explicit contextualizer"
+            "A/B/C: ≥2 of {macro, ratio, safety, identity} OR holistic≥1; "
+            "D: ≥2 of {macro, ratio, cookability, identity} OR competitor cookability veto; "
+            "E: ≥2 of {macro, ratio, taste, cookability}"
         ),
     }
     _atomic_write_json(active_suite_dir / "summary.json", summary)
@@ -1186,7 +1796,12 @@ def run_suite(
 def main() -> None:
     _load_dotenv()
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--suites", type=str, default="A,B,C", help="Comma-separated A,B,C")
+    p.add_argument(
+        "--suites",
+        type=str,
+        default="A,B,C",
+        help="Comma-separated subset of A,B,C,D,E",
+    )
     p.add_argument("--n-dishes-a", type=int, default=12)
     p.add_argument("--n-dishes-c", type=int, default=8)
     p.add_argument("--max-iterations", type=int, default=2)

@@ -1,6 +1,6 @@
-# Recipe Opt Agent playground
+# MacroIQ web UI
 
-Live UI for the LangGraph recipe optimization agent: inputs, step stream with LLM rationale, and a flow graph that highlights active nodes.
+Product UI and developer playground for the LangGraph recipe optimization agent.
 
 Partner setup (branch, env, local store): see the **Recipe optimization agent** section in the [project README](../README.md).
 
@@ -9,7 +9,9 @@ Partner setup (branch, env, local store): see the **Recipe optimization agent** 
 ```bash
 # from repo root
 PYTHONPATH=scripts:. uv run python -m recipe_opt_web --reload
-# → http://127.0.0.1:8010
+# → http://127.0.0.1:8010             MacroIQ product UI
+# → http://127.0.0.1:8010/playground  flow graph + transcript playground
+# → http://127.0.0.1:8010/loop-demo   simple agent-loop presentation demo
 ```
 
 Or:
@@ -17,6 +19,19 @@ Or:
 ```bash
 PYTHONPATH=scripts:. uv run uvicorn recipe_opt_web.server:app --reload --port 8010
 ```
+
+### MacroIQ product (`/`)
+
+Semantic ask, macro ranges, searchable menu of indexed canonical dishes, and a live
+pipeline stage that surfaces load phases, optimizer status, nutrient position vs the
+box, proposed edits, and LLM inference calls as the agent runs.
+
+### Loop demo (`/loop-demo`)
+
+A separate, simpler page for talk tracks: query + macro sliders, then step readouts
+(neighborhood → draft → diagnose → propose / decide / apply → expand → compare → done).
+Readouts look static but are editable (`contenteditable`) so you can tweak numbers live.
+No agent backend calls — demo content only.
 
 ## Inputs
 

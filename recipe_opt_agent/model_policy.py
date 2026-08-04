@@ -76,6 +76,10 @@ def select_draft_model(cfg: AgentConfig) -> str:
     return cfg.creative_model
 
 
+def select_shadow_draft_model(cfg: AgentConfig) -> str:
+    return getattr(cfg, "shadow_draft_model", None) or "gpt-5.5"
+
+
 def select_judge_model(cfg: AgentConfig) -> str:
     return cfg.judge_model
 

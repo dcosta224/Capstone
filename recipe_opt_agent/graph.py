@@ -14,7 +14,13 @@ from recipe_opt_agent.config import AgentConfig, identity_roles_for_title
 from recipe_opt_agent.context_builder import build_decision_context
 from recipe_opt_agent.identity_roles import resolve_identity_roles
 from recipe_opt_agent.llm import decide_action_llm, judge_finalists_llm, llm_draft_recipe
-from recipe_opt_agent.model_policy import select_decide_model, select_draft_model, select_judge_model, select_tags_model
+from recipe_opt_agent.model_policy import (
+    select_decide_model,
+    select_draft_model,
+    select_judge_model,
+    select_shadow_draft_model,
+    select_tags_model,
+)
 from recipe_opt_agent.requirement_tags import (
     RequirementTag,
     deduce_requirement_tags,
@@ -58,6 +64,27 @@ def _cfg(state: AgentState) -> AgentConfig:
 
 def _agent_mode(state: AgentState) -> str:
     return str(state.get("agent_mode") or _cfg(state).agent_mode or "neighborhood")
+
+
+def _strip_private_keys(obj: Any) -> Any:
+    """Drop underscore-prefixed keys so model authorship stays out of judge / UI payloads."""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_private_keys(v)
+            for k, v in obj.items()
+            if not str(k).startswith("_")
+        }
+    if isinstance(obj, list):
+        return [_strip_private_keys(v) for v in obj]
+    return obj
+
+
+def _public_survivor(survivor: dict[str, Any] | Any) -> Any:
+    if hasattr(survivor, "to_dict"):
+        survivor = survivor.to_dict()
+    if isinstance(survivor, dict):
+        return _strip_private_keys(survivor)
+    return survivor
 
 
 def _requirement_tags(state: AgentState) -> list[RequirementTag]:
@@ -184,11 +211,19 @@ def node_diagnose(state: AgentState) -> dict[str, Any]:
         if nid and str(nid) not in marginal_nodes:
             marginal_nodes.append(str(nid))
     total_mass = float(problem.get("total_mass") or x0.sum())
-    kcal_target = float(problem.get("kcal_target") or 0.0)
+    from recipe_opt_agent.kcal_utils import resolve_kcal_target, restore_kcal_target
+
+    problem = restore_kcal_target(problem, cfg)
+    kcal_target = float(resolve_kcal_target(cfg, problem) or 0.0)
     if kcal_target <= 0:
         from weighted_empirical_opt import atwater_kcal
 
         kcal_target = float(atwater_kcal(x0, M))
+    # Keep mass consistent with the calorie target used by the LP.
+    total_mass = float(problem.get("total_mass") or x0.sum())
+    x0 = np.asarray(problem.get("x0") or x0, dtype=float)
+    M = np.asarray(problem.get("M") or M, dtype=float)
+    ingredient_basis = list(problem.get("ingredient_basis") or ingredient_basis)
 
     hull = region_intersects_hull(M, box, kcal_target=kcal_target)
     opt = optimize_weighted_empirical_obj(
@@ -367,6 +402,7 @@ def node_diagnose(state: AgentState) -> dict[str, Any]:
         "M": np.asarray(M, dtype=float).tolist(),
         "total_mass": total_mass,
         "kcal_target": kcal_target,
+        "user_kcal_target": resolve_kcal_target(cfg, problem) or problem.get("user_kcal_target"),
         "marginal_nodes": marginal_nodes,
         "ingredient_basis": ingredient_basis,
         "basis_samples": {k: np.asarray(v).tolist() for k, v in basis_samples.items()},
@@ -667,6 +703,8 @@ def node_propose(state: AgentState) -> dict[str, Any]:
         "title": state.get("title"),
         "user_request": state.get("user_request") or state.get("taste_text"),
         "taste_text": state.get("taste_text"),
+        "taste_preference": (state.get("problem") or {}).get("taste_preference")
+        or state.get("taste_preference"),
         "identity_roles": state.get("identity_roles"),
         "requirement_tags": [t.to_dict() if hasattr(t, "to_dict") else t for t in tags],
         "fidelity_band": state.get("fidelity_band"),
@@ -1187,6 +1225,7 @@ def node_decide(state: AgentState) -> dict[str, Any]:
             "action": "apply_bundle",
             "chosen_candidate_id": None,
             "chosen_bundle_id": favorite.get("bundle_id"),
+            "edits": list(favorite.get("edits") or []),
             "rationale": "auto_clear_favorite",
             "identity": {
                 "preserves_dish": True,
@@ -1208,6 +1247,7 @@ def node_decide(state: AgentState) -> dict[str, Any]:
                     "action": decision["action"],
                     "chosen_bundle_id": decision["chosen_bundle_id"],
                     "delta_L_star": favorite.get("delta_L_star"),
+                    "edits": decision["edits"],
                     "rationale": decision["rationale"],
                 },
                 "output": decision,
@@ -1347,6 +1387,34 @@ def node_decide(state: AgentState) -> dict[str, Any]:
         ]
         tel = bump_telemetry(state.get("run_telemetry"), n_llm_calls=1 if llm_trace.get("mode") == "openai" else 0)
 
+    # On iteration 0, never settle for accept when an improving LP bundle exists —
+    # force at least one proportion-improving apply before early exit.
+    it_now = int(state.get("iteration") or 0)
+    if it_now < 1 and decision.get("action") in {"accept", "accept_pool_best"}:
+        improve_ranked = [
+            b
+            for b in (state.get("bundles") or [])
+            if b.get("delta_L_star") is not None
+            and not b.get("oscillation_blocked")
+            and float(b["delta_L_star"]) < -1e-6
+            and b.get("next_problem")
+        ]
+        if improve_ranked:
+            best_improve = min(improve_ranked, key=lambda b: float(b["delta_L_star"]))
+            decision = {
+                **decision,
+                "action": "apply_bundle",
+                "chosen_bundle_id": best_improve.get("bundle_id"),
+                "chosen_candidate_id": None,
+                "edits": list(best_improve.get("edits") or []),
+                "rationale": (
+                    "iter0_force_improve: blocked early accept; applying best LP bundle "
+                    f"(delta_L_star={best_improve.get('delta_L_star')}). "
+                    f"Original: {decision.get('rationale')}"
+                ),
+                "iter0_force_improve": True,
+            }
+
     # LP agreement
     lp_best_id = None
     ranked = [
@@ -1387,15 +1455,18 @@ def node_decide(state: AgentState) -> dict[str, Any]:
             "action": decision.get("action"),
             "chosen_bundle_id": decision.get("chosen_bundle_id"),
             "chosen_candidate_id": decision.get("chosen_candidate_id"),
-            "edits": (favorite or {}).get("edits")
-            if favorite is not None
-            else next(
-                (
-                    b.get("edits")
-                    for b in (state.get("bundles") or [])
-                    if str(b.get("bundle_id")) == str(decision.get("chosen_bundle_id"))
-                ),
-                None,
+            "edits": decision.get("edits")
+            or (
+                (favorite or {}).get("edits")
+                if favorite is not None
+                else next(
+                    (
+                        b.get("edits")
+                        for b in (state.get("bundles") or [])
+                        if str(b.get("bundle_id")) == str(decision.get("chosen_bundle_id"))
+                    ),
+                    None,
+                )
             ),
             "rationale": decision.get("rationale"),
         },
@@ -1442,6 +1513,36 @@ def node_decide(state: AgentState) -> dict[str, Any]:
                 "rationale": decision.get("rationale"),
             }
         )
+
+    # Always attach concrete edits onto the decision for UI progress copy.
+    if not decision.get("edits"):
+        bid = decision.get("chosen_bundle_id")
+        if bid is not None:
+            for b in state.get("bundles") or []:
+                if str(b.get("bundle_id")) == str(bid) and b.get("edits"):
+                    decision["edits"] = list(b.get("edits") or [])
+                    break
+        if not decision.get("edits") and decision.get("chosen_candidate_id") is not None:
+            cid = str(decision.get("chosen_candidate_id"))
+            for c in state.get("candidates") or []:
+                if str(c.get("candidate_id")) != cid:
+                    continue
+                decision["edits"] = [
+                    {
+                        "action": c.get("action"),
+                        "label": c.get("label"),
+                        "replace_label": c.get("replace_label")
+                        or ((c.get("meta") or {}).get("swap_out_label")),
+                    }
+                ]
+                break
+    # Keep tool summaries in sync so SSE clients that only read output_summary see edits.
+    for tool in tools_used:
+        if not isinstance(tool, dict):
+            continue
+        summary = tool.setdefault("output_summary", {})
+        if isinstance(summary, dict) and decision.get("edits") and not summary.get("edits"):
+            summary["edits"] = list(decision.get("edits") or [])
 
     return {
         "decision": decision,
@@ -1690,13 +1791,23 @@ def node_apply_or_expand(state: AgentState) -> dict[str, Any]:
     fps = list(state.get("recent_edit_fingerprints") or [])
     fps.append(edit_fingerprint([cand]))
     tel = bump_telemetry(state.get("run_telemetry"), nodes={"apply": {"status": apply_status, "kind": "single"}})
+    cand_edits = [
+        {
+            "action": cand.get("action"),
+            "label": cand.get("label"),
+            "replace_label": cand.get("replace_label")
+            or ((cand.get("meta") or {}).get("swap_out_label")),
+            "candidate_id": cand.get("candidate_id"),
+        }
+    ]
+    cand_pub = {**cand, "edits": cand.get("edits") or cand_edits}
 
     return {
         "iteration": iteration,
         "problem": problem,
         "chosen_recipe": (problem.get("chosen_recipe") or state.get("chosen_recipe")),
         "status": status,
-        "last_applied_candidate": cand,
+        "last_applied_candidate": cand_pub,
         "recent_edit_fingerprints": fps[-6:],
         "run_telemetry": tel,
         "tools_used": [
@@ -1707,10 +1818,11 @@ def node_apply_or_expand(state: AgentState) -> dict[str, Any]:
                     "candidate_id": cand.get("candidate_id"),
                     "label": cand.get("label"),
                     "action": cand.get("action"),
+                    "edits": cand_pub.get("edits"),
                     "apply_note": apply_note,
                     "n_ingredients_after": len(np.asarray(problem.get("x0") or []).ravel()),
                 },
-                "output": {"candidate": cand, "apply_note": apply_note},
+                "output": {"candidate": cand_pub, "apply_note": apply_note},
             }
         ],
     }
@@ -1720,7 +1832,11 @@ def _enrich_final_display(state: AgentState, final_payload: dict[str, Any]) -> d
     """Attach authoritative display_scores + sync telemetry from the chosen recipe."""
     from recipe_opt_agent.score_display import (
         build_display_scores,
+        extract_judge_rationale,
         extract_ratio_and_nutrient,
+        filter_display_ingredients,
+        prepare_browse_candidates,
+        proportion_typicality_from_ingredients,
         select_path_finalists,
     )
 
@@ -1739,7 +1855,76 @@ def _enrich_final_display(state: AgentState, final_payload: dict[str, Any]) -> d
     entry = chosen.get("entry") if isinstance(chosen.get("entry"), dict) else None
     if entry and isinstance(entry.get("opt"), dict):
         final_payload["opt"] = entry["opt"]
+    final_payload["last_applied_candidate"] = (
+        final_payload.get("last_applied_candidate") or state.get("last_applied_candidate")
+    )
+    final_payload["decision_outcomes"] = (
+        final_payload.get("decision_outcomes") or state.get("decision_outcomes") or []
+    )
+    final_payload["original_ingredients"] = (
+        final_payload.get("original_ingredients")
+        or state.get("original_ingredients")
+        or []
+    )
     display = build_display_scores(final_payload)
+    try:
+        from recipe_opt_agent.portion_display import (
+            consolidate_duplicate_ingredients,
+            enrich_ingredients_with_usda_portions,
+        )
+
+        display = dict(display)
+        display["ingredients"] = enrich_ingredients_with_usda_portions(
+            list(display.get("ingredients") or [])
+        )
+        merged, problem_update = consolidate_duplicate_ingredients(
+            list(display.get("ingredients") or []),
+            problem=final_payload.get("problem")
+            if isinstance(final_payload.get("problem"), dict)
+            else None,
+        )
+        merged = filter_display_ingredients(merged)
+        display["ingredients"] = merged
+        if problem_update is not None:
+            final_payload["problem"] = problem_update
+        # Refresh proportion copy after merge so the verdict matches the rows shown.
+        try:
+            typicality = proportion_typicality_from_ingredients(merged)
+            ratio = dict(display.get("ratio_loss") or {})
+            ratio["band"] = typicality.get("band") or ratio.get("band")
+            ratio["band_summary"] = typicality.get("summary") or ratio.get("band_summary")
+            ratio["proportion_key"] = typicality.get("key")
+            ratio["proportion_css"] = typicality.get("css")
+            ratio["outside_iqr_frac"] = typicality.get("outside_iqr_frac")
+            ratio["outside_iqr_pct"] = typicality.get("outside_iqr_pct")
+            ratio["outside_iqr_calorie_frac"] = typicality.get("outside_iqr_calorie_frac")
+            ratio["outside_iqr_calorie_pct"] = typicality.get("outside_iqr_calorie_pct")
+            display["ratio_loss"] = ratio
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Enforce the user calorie target on the primary displayed recipe.
+    from recipe_opt_agent.kcal_utils import resolve_user_kcal_target, scale_candidate_to_kcal
+
+    user_kcal = resolve_user_kcal_target(
+        final_payload.get("config"),
+        state.get("config"),
+        final_payload.get("problem"),
+        state.get("problem"),
+        cfg,
+    )
+    if user_kcal is not None:
+        problem_scaled, display_scaled = scale_candidate_to_kcal(
+            problem=final_payload.get("problem") if isinstance(final_payload.get("problem"), dict) else {},
+            display=display,
+            kcal_target=user_kcal,
+        )
+        if display_scaled is not None:
+            display = display_scaled
+        if problem_scaled is not None:
+            final_payload["problem"] = problem_scaled
     final_payload["display_scores"] = display
 
     ratio, ratio_src, nutrient, _nut_src = extract_ratio_and_nutrient(final_payload)
@@ -1758,6 +1943,51 @@ def _enrich_final_display(state: AgentState, final_payload: dict[str, Any]) -> d
         state,
         ood_handicap=float(getattr(cfg, "ood_delta_handicap", 0.015) or 0.0),
     )
+    enable_judge = bool(getattr(cfg, "enable_llm_judge", False))
+    judge_mode = str(getattr(cfg, "llm_judge_mode", "demote_weird") or "demote_weird").lower()
+    if enable_judge and judge_mode == "full" and not final_payload.get("judge_rationale"):
+        final_payload["judge_rationale"] = extract_judge_rationale(final_payload)
+    elif not final_payload.get("weird_candidate_ids"):
+        # Demote mode only surfaces rationale when something was actually demoted.
+        if judge_mode != "full":
+            final_payload["judge_rationale"] = None
+    browse = prepare_browse_candidates(
+        final_payload,
+        state,
+        max_candidates=int(getattr(cfg, "max_finalists", 4) or 4),
+    )
+    final_payload["browse_candidates"] = browse
+    # Primary result = best card after proportion rank + weird demotion.
+    if browse:
+        best = browse[0]
+        if best.get("display_scores"):
+            final_payload["display_scores"] = best["display_scores"]
+        if isinstance(best.get("problem"), dict) and best["problem"]:
+            final_payload["problem"] = best["problem"]
+        if isinstance(best.get("macro_targets"), dict) and best["macro_targets"]:
+            final_payload["macro_targets"] = best["macro_targets"]
+        chosen = dict(final_payload.get("chosen") or {})
+        if judge_mode != "full" or chosen.get("source") != "final_arbiter":
+            chosen["source"] = "proportion_rank"
+        chosen["proportion_rank"] = 1
+        chosen["candidate_id"] = best.get("candidate_id")
+        entry = dict(chosen.get("entry") or {}) if isinstance(chosen.get("entry"), dict) else {}
+        entry["candidate_id"] = best.get("candidate_id")
+        chosen["entry"] = entry
+        if judge_mode != "full":
+            chosen.pop("arbiter_rationale", None)
+            chosen.pop("arbiter_winner_id", None)
+            chosen.pop("judge", None)
+        final_payload["chosen"] = chosen
+        # Refresh telemetry ratio from the promoted card.
+        ratio, ratio_src, nutrient, _nut_src = extract_ratio_and_nutrient(final_payload)
+        tel = dict(final_payload.get("run_telemetry") or {})
+        tel["final_ratio_term"] = ratio
+        tel["final_ratio_source"] = ratio_src
+        tel["final_nutrient_slack"] = nutrient
+        tel["proportion_rank_winner_id"] = best.get("candidate_id")
+        tel["n_weird_demoted"] = sum(1 for c in browse if c.get("is_weird"))
+        final_payload["run_telemetry"] = tel
     return final_payload
 
 
@@ -1765,7 +1995,13 @@ def _attach_final_gpt4o_evaluation(
     state: AgentState,
     final_payload: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
-    """GPT-5.5 holistic evaluation of the selected recipe; returns (payload, eval, tools)."""
+    """Optional GPT holistic evaluation — only in full judge mode."""
+    cfg = _cfg(state)
+    if not bool(getattr(cfg, "enable_llm_judge", False)):
+        return final_payload, None, []
+    if str(getattr(cfg, "llm_judge_mode", "demote_weird") or "demote_weird").lower() != "full":
+        return final_payload, None, []
+
     from recipe_opt_agent.final_evaluator import evaluate_final_recipe
     from recipe_opt_agent.score_display import band_for_holistic_0_10
 
@@ -1820,7 +2056,144 @@ def _attach_final_gpt4o_evaluation(
     return final_payload, evaluation, tools
 
 
+def _run_llm_judge_pass(
+    state: AgentState,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Run demote-weird screen or full arbiter. Returns (judgment, tools)."""
+    cfg = _cfg(state)
+    if not bool(getattr(cfg, "enable_llm_judge", False)):
+        return None, []
+    mode = str(getattr(cfg, "llm_judge_mode", "demote_weird") or "demote_weird").lower()
+    tools: list[dict[str, Any]] = []
+    if mode == "full":
+        try:
+            from recipe_opt_agent.final_arbiter import arbitrate_final_recipe
+
+            judgment = arbitrate_final_recipe(state)
+        except Exception as exc:
+            judgment = {"error": str(exc)}
+        if judgment and not judgment.get("error"):
+            public_judgment = {
+                k: v
+                for k, v in judgment.items()
+                if k not in {"_llm_trace", "winner_entry", "_shadow_consideration"}
+            }
+            tools.append(
+                {
+                    "name": "final_arbiter_llm",
+                    "purpose": (
+                        "Final judgment across saved candidates: relative loss gaps vs intent drift "
+                        "(clash ingredients need overwhelming numeric case)"
+                    ),
+                    "mode": (judgment.get("_llm_trace") or {}).get("mode"),
+                    "model": (judgment.get("_llm_trace") or {}).get("model"),
+                    "output_summary": {
+                        "winner_id": judgment.get("winner_id"),
+                        "ranking": judgment.get("ranking"),
+                        "rationale": judgment.get("rationale"),
+                        "holistic_0_10": judgment.get("holistic_0_10"),
+                        "n_candidates": len(judgment.get("comparison") or []),
+                    },
+                    "output": public_judgment,
+                    "llm_trace": judgment.get("_llm_trace"),
+                }
+            )
+        return judgment, tools
+
+    # Default: demote_weird — flag disasters only; do not pick a winner.
+    try:
+        from recipe_opt_agent.final_arbiter import flag_weird_candidates, weird_ids_from_judgment
+
+        judgment = flag_weird_candidates(state)
+    except Exception as exc:
+        judgment = {"error": str(exc)}
+    if judgment and not judgment.get("error"):
+        flags = weird_ids_from_judgment(judgment)
+        judgment = {
+            **judgment,
+            "weird_flags": flags,
+            "weird_candidate_ids": list(judgment.get("weird_candidate_ids") or list(flags.keys())),
+        }
+        tools.append(
+            {
+                "name": "weirdness_flagger_llm",
+                "purpose": (
+                    "Screen candidates for culinary disasters only; demote weird recipes "
+                    "without ranking the rest"
+                ),
+                "mode": (judgment.get("_llm_trace") or {}).get("mode"),
+                "model": (judgment.get("_llm_trace") or {}).get("model"),
+                "output_summary": {
+                    "n_weird": len(judgment.get("weird_candidate_ids") or []),
+                    "weird_candidate_ids": judgment.get("weird_candidate_ids"),
+                    "rationale": judgment.get("rationale"),
+                },
+                "output": {
+                    k: v
+                    for k, v in judgment.items()
+                    if k not in {"_llm_trace", "comparison"}
+                },
+                "llm_trace": judgment.get("_llm_trace"),
+            }
+        )
+    return judgment, tools
+
+
+def _apply_judge_to_final_payload(
+    final_payload: dict[str, Any],
+    judgment: dict[str, Any] | None,
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    """Attach judge outputs for browse demotion / optional full-mode pick metadata."""
+    if not judgment or judgment.get("error"):
+        return final_payload
+    mode = (mode or "demote_weird").lower()
+    if mode == "full":
+        final_payload["final_judgment"] = {
+            k: v for k, v in judgment.items() if not str(k).startswith("_")
+        }
+        if judgment.get("rationale"):
+            final_payload["judge_rationale"] = judgment.get("rationale")
+        # Also demote clash verdicts in full mode so browse stays consistent.
+        from recipe_opt_agent.final_arbiter import weird_ids_from_judgment
+
+        flags = weird_ids_from_judgment(judgment)
+        if flags:
+            final_payload["weird_flags"] = flags
+            final_payload["weird_candidate_ids"] = list(flags.keys())
+        return final_payload
+
+    flags = judgment.get("weird_flags") or {}
+    if not flags:
+        from recipe_opt_agent.final_arbiter import weird_ids_from_judgment
+
+        flags = weird_ids_from_judgment(judgment)
+    final_payload["weird_flags"] = flags
+    final_payload["weird_candidate_ids"] = list(
+        judgment.get("weird_candidate_ids") or list(flags.keys())
+    )
+    final_payload["final_judgment"] = {
+        k: v
+        for k, v in judgment.items()
+        if k in {"flags", "weird_flags", "weird_candidate_ids", "rationale"}
+        or (not str(k).startswith("_") and k not in {"comparison"})
+    }
+    if judgment.get("rationale") and final_payload.get("weird_candidate_ids"):
+        final_payload["judge_rationale"] = judgment.get("rationale")
+    else:
+        final_payload["judge_rationale"] = None
+    return final_payload
+
+
 def node_finalize(state: AgentState) -> dict[str, Any]:
+    shadow_patch = _await_shadow_candidate(state)
+    if shadow_patch:
+        state = {**state, **{k: v for k, v in shadow_patch.items() if not str(k).startswith("_")}}
+        # Keep private collect meta on state for arbiter audit.
+        if shadow_patch.get("_shadow_collect_meta") is not None:
+            state = {**state, "_shadow_collect_meta": shadow_patch["_shadow_collect_meta"]}
+
     band = state.get("fidelity_band")
     decision = state.get("decision") or {}
     action = decision.get("action")
@@ -1830,14 +2203,13 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
 
     # Creative mode: use scored finalists if present
     if mode == "creative" and state.get("scored_finalists"):
-        scored = state.get("scored_finalists") or []
-        winner_id = (state.get("judge_result") or {}).get("winner_id")
-        winner = next(
-            (s for s in scored if s.get("candidate_id") == winner_id),
-            scored[0] if scored else None,
-        )
-        win_id = (winner or {}).get("candidate_id")
-        alts = [s for s in scored if s.get("candidate_id") != win_id][:4]
+        scored = list(state.get("scored_finalists") or [])
+        # Deterministic order only — LLM judge is off; browse rank will re-order
+        # by proportion quality and promote the best card as Recommended.
+        max_n = max(1, int((_cfg(state).max_finalists)))
+        ordered = scored[:max_n]
+        winner = ordered[0] if ordered else None
+        alts = ordered[1:]
         foodon_report = (winner or {}).get("foodon_basis_report") or (
             (state.get("problem") or {}).get("foodon_basis_report")
             or state.get("foodon_basis_report")
@@ -1845,7 +2217,6 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
         chosen = {
             "source": "creative_finalist",
             "entry": winner,
-            "judge": state.get("judge_result"),
             "foodon_basis_report": foodon_report,
         }
         status = "accepted_creative"
@@ -1855,7 +2226,7 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
             "chosen": chosen,
             "foodon_basis_report": foodon_report,
             "alternatives": alts,
-            "scored_finalists": scored,
+            "scored_finalists": ordered,
             "interesting_candidates": state.get("interesting_candidates") or [],
             "history": state.get("history"),
             "decision_outcomes": state.get("decision_outcomes"),
@@ -1864,8 +2235,11 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
             "taste_text": state.get("taste_text"),
             "user_request": state.get("user_request"),
             "requirement_tags": state.get("requirement_tags"),
-            "judge_result": state.get("judge_result"),
+            "judge_result": None,
         }
+        judge_mode = str(getattr(_cfg(state), "llm_judge_mode", "demote_weird") or "demote_weird")
+        judgment, judge_tools = _run_llm_judge_pass(state)
+        final_payload = _apply_judge_to_final_payload(final_payload, judgment, mode=judge_mode)
         final_payload = _enrich_final_display(state, final_payload)
         final_payload, final_evaluation, eval_tools = _attach_final_gpt4o_evaluation(state, final_payload)
         return {
@@ -1874,7 +2248,7 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
             "run_telemetry": final_payload.get("run_telemetry") or tel,
             "live_scores": final_payload.get("display_scores"),
             "final_evaluation": final_evaluation,
-            "tools_used": eval_tools,
+            "tools_used": list(judge_tools) + list(eval_tools),
         }
 
     if band == FidelityBand.ACCEPT.value or action == "accept":
@@ -1892,17 +2266,16 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
         chosen = {"source": "best_effort", "opt": state.get("opt"), "diagnosis": state.get("diagnosis")}
         status = "failed_or_best_effort"
 
-    # Final LLM arbitration: compare all saved intermediate candidates on
-    # relative loss gaps vs intent drift, and let the judge override the
-    # numeric default (e.g. reject a clash ingredient bought with a 1% gain).
-    final_judgment = None
-    try:
-        from recipe_opt_agent.final_arbiter import arbitrate_final_recipe
-
-        final_judgment = arbitrate_final_recipe(state)
-    except Exception as exc:
-        final_judgment = {"error": str(exc)}
-    if final_judgment and final_judgment.get("winner_id") and final_judgment.get("winner_entry"):
+    # LLM judge: demote weird recipes (default) or full arbiter pick (llm_judge_mode=full).
+    cfg = _cfg(state)
+    judge_mode = str(getattr(cfg, "llm_judge_mode", "demote_weird") or "demote_weird").lower()
+    final_judgment, judge_tools = _run_llm_judge_pass(state)
+    if (
+        judge_mode == "full"
+        and final_judgment
+        and final_judgment.get("winner_id")
+        and final_judgment.get("winner_entry")
+    ):
         winner = final_judgment["winner_entry"]
         chosen = {
             "source": "final_arbiter",
@@ -1933,9 +2306,10 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
         "run_telemetry": tel,
         "title": state.get("title"),
         "taste_text": state.get("taste_text"),
-        "judge_result": state.get("judge_result"),
-        "final_judgment": final_judgment,
+        "judge_result": state.get("judge_result") if judge_mode == "full" else None,
+        "final_judgment": None,
     }
+    final_payload = _apply_judge_to_final_payload(final_payload, final_judgment, mode=judge_mode)
     # Prefer live chosen_recipe ingredients when pool/current lacks them
     if not (chosen.get("ingredients") or (isinstance(chosen.get("entry"), dict) and chosen["entry"].get("ingredients"))):
         cr = state.get("chosen_recipe") or (state.get("problem") or {}).get("chosen_recipe") or {}
@@ -1949,33 +2323,32 @@ def node_finalize(state: AgentState) -> dict[str, Any]:
         "status": status,
         "run_telemetry": final_payload.get("run_telemetry") or tel,
         "live_scores": final_payload.get("display_scores"),
-        "final_judgment": final_judgment,
+        "final_judgment": (
+            {k: v for k, v in final_judgment.items() if not str(k).startswith("_")}
+            if isinstance(final_judgment, dict)
+            else final_judgment
+        ),
         "final_evaluation": final_evaluation,
     }
-    tools_used: list[dict[str, Any]] = list(eval_tools)
-    if final_judgment and not final_judgment.get("error"):
-        tools_used.append(
-            {
-                "name": "final_arbiter_llm",
-                "purpose": (
-                    "Final judgment across saved candidates: relative loss gaps vs intent drift "
-                    "(clash ingredients need overwhelming numeric case)"
-                ),
-                "mode": (final_judgment.get("_llm_trace") or {}).get("mode"),
-                "model": (final_judgment.get("_llm_trace") or {}).get("model"),
-                "output_summary": {
-                    "winner_id": final_judgment.get("winner_id"),
-                    "ranking": final_judgment.get("ranking"),
-                    "rationale": final_judgment.get("rationale"),
-                    "holistic_0_10": final_judgment.get("holistic_0_10"),
-                    "n_candidates": len(final_judgment.get("comparison") or []),
-                },
-                "output": {k: v for k, v in final_judgment.items() if k not in {"_llm_trace", "winner_entry"}},
-                "llm_trace": final_judgment.get("_llm_trace"),
-            }
-        )
+    tools_used: list[dict[str, Any]] = list(judge_tools) + list(eval_tools)
+    # Persist shadow/arbiter consideration on telemetry only (not tools_used / UI).
+    consideration = (final_judgment or {}).get("_shadow_consideration") if isinstance(final_judgment, dict) else None
+    if consideration:
+        tel = dict(final_payload.get("run_telemetry") or tel or {})
+        nodes = dict(tel.get("nodes") or {})
+        nodes["shadow_arbiter_consideration"] = consideration
+        tel["nodes"] = nodes
+        final_payload["run_telemetry"] = tel
+        out["run_telemetry"] = tel
     if tools_used:
         out["tools_used"] = tools_used
+    if shadow_patch:
+        if shadow_patch.get("candidate_pool") is not None:
+            out["candidate_pool"] = shadow_patch["candidate_pool"]
+        if shadow_patch.get("interesting_candidates") is not None:
+            out["interesting_candidates"] = shadow_patch["interesting_candidates"]
+        if "shadow_job_id" in shadow_patch:
+            out["shadow_job_id"] = shadow_patch["shadow_job_id"]
     return out
 
 
@@ -1993,6 +2366,10 @@ def _route_after_diagnose(state: AgentState) -> Literal["save_candidate", "propo
         return "propose"
 
     if band == FidelityBand.ACCEPT.value:
+        # Never finalize on the first diagnose pass — always score at least one
+        # propose/decide cycle so proportions can improve before early accept.
+        if it < 1:
+            return "propose"
         return "finalize"
     if it >= cfg.max_iterations:
         return "finalize"
@@ -2022,6 +2399,9 @@ def _route_after_decide(state: AgentState) -> Literal["finalize", "apply", "buil
             return "build_finalists"
         return "apply"
     if action in {"accept", "accept_pool_best"}:
+        # Route through apply on iter 0 so iteration advances before finalize.
+        if it < 1:
+            return "apply"
         return "finalize"
     if it + 1 >= cfg.max_iterations and action != "expand":
         return "apply"
@@ -2070,10 +2450,15 @@ def node_llm_draft(state: AgentState) -> dict[str, Any]:
     request = state.get("user_request") or state.get("taste_text") or ""
     model = select_draft_model(cfg)
     example = (state.get("problem") or {}).get("example_recipe")
+    from recipe_opt_agent.kcal_utils import resolve_kcal_target
+
+    kcal_target = resolve_kcal_target(cfg, state.get("problem"))
     draft, trace = llm_draft_recipe(
         request,
         macro_box=cfg.target_box_dict(),
         example_recipe=example if isinstance(example, dict) else None,
+        canonical_title=state.get("title") or None,
+        kcal_target=kcal_target,
         model=model,
     )
     tel = bump_telemetry(
@@ -2114,6 +2499,75 @@ def node_llm_draft(state: AgentState) -> dict[str, Any]:
     }
 
 
+def node_shadow_gpt_candidate(state: AgentState) -> dict[str, Any]:
+    """Start GPT-5.5 draft→optimize in a background thread (non-blocking)."""
+    from recipe_opt_agent.shadow_gpt_candidate import start_shadow_gpt_job
+    from recipe_opt_agent.telemetry import bump_telemetry
+
+    cfg = _cfg(state)
+    if not bool(getattr(cfg, "enable_shadow_gpt_candidate", True)):
+        return {}
+    if state.get("shadow_job_id"):
+        return {}
+    job_id = start_shadow_gpt_job(
+        state,
+        model=select_shadow_draft_model(cfg),
+        enabled=True,
+    )
+    if not job_id:
+        return {}
+    tel = bump_telemetry(
+        state.get("run_telemetry"),
+        nodes={
+            "shadow_gpt_candidate": {
+                "async": True,
+                "job_started": True,
+                "job_id": job_id,
+                # Model stays in backend telemetry only (not tools_used / UI steps).
+                "_shadow_model": select_shadow_draft_model(cfg),
+            }
+        },
+    )
+    # Intentionally omit tools_used / model so UIs do not surface authorship.
+    return {
+        "shadow_job_id": job_id,
+        "run_telemetry": tel,
+    }
+
+
+def _await_shadow_candidate(state: AgentState) -> dict[str, Any]:
+    """Join the async shadow job and merge into pools before finalists/arbiter."""
+    from recipe_opt_agent.shadow_gpt_candidate import merge_shadow_into_pools
+    from recipe_opt_agent.telemetry import bump_telemetry
+
+    if not state.get("shadow_job_id") and any(
+        str((e or {}).get("candidate_id") or "").startswith("pool_shadow")
+        for e in list(state.get("candidate_pool") or [])
+        + list(state.get("interesting_candidates") or [])
+    ):
+        return {}
+    merged = merge_shadow_into_pools(state)
+    meta = merged.get("shadow_collect_meta") or {}
+    tel = bump_telemetry(
+        state.get("run_telemetry"),
+        nodes={
+            "shadow_gpt_collect": {
+                "async": True,
+                "collected": bool(meta.get("collected") or meta.get("skipped")),
+                "has_entry": bool(meta.get("has_entry")),
+                "timed_out": bool(meta.get("timed_out")),
+                "elapsed_s": meta.get("elapsed_s"),
+                "error": meta.get("error"),
+                "_shadow_model": meta.get("model"),
+            }
+        },
+    )
+    out = {k: v for k, v in merged.items() if k != "shadow_collect_meta"}
+    out["run_telemetry"] = tel
+    out["_shadow_collect_meta"] = meta
+    return out
+
+
 def node_ground_recipe(state: AgentState) -> dict[str, Any]:
     from recipe_opt_agent.draft_schema import parse_draft
     from recipe_opt_agent.grounding import ground_draft_to_problem
@@ -2133,7 +2587,24 @@ def node_ground_recipe(state: AgentState) -> dict[str, Any]:
         ratio_samples=problem_stub.get("ratio_samples"),
         retrieval_context=ctx,
         offline=bool(problem_stub.get("grounding_offline") or problem_stub.get("creative_offline")),
+        use_dequant_cache=True,
     )
+    from recipe_opt_agent.kcal_utils import restore_kcal_target
+
+    problem = restore_kcal_target(problem, _cfg(state), problem_stub)
+    # Keep neighborhood geometry / hull context from the stub when present.
+    for key in (
+        "basis_samples",
+        "basis_sample_weights",
+        "ratio_samples",
+        "marginal_nodes",
+        "neighborhood_hull_context",
+        "foodon_basis_report",
+        "neighborhood_recipes",
+        "retrieval_context",
+    ):
+        if problem_stub.get(key) is not None and problem.get(key) is None:
+            problem[key] = problem_stub[key]
     roles = resolve_identity_roles(
         title=chosen.get("title") or state.get("title") or draft.title or "",
         request=state.get("user_request") or state.get("taste_text") or "",
@@ -2171,6 +2642,8 @@ def node_ground_recipe(state: AgentState) -> dict[str, Any]:
                     "resolve_rate": resolve_rate,
                     "n_ingredients": len(chosen.get("ingredients") or []),
                     "identity_roles": roles,
+                    "dequant_cache_used": bool(report_dict.get("dequant_cache_used")),
+                    "dequant_cache_hits": int(report_dict.get("dequant_cache_hits") or 0),
                 },
                 "output": {"report": report_dict, "chosen_recipe": chosen},
             }
@@ -2180,6 +2653,12 @@ def node_ground_recipe(state: AgentState) -> dict[str, Any]:
 
 def node_build_finalists(state: AgentState) -> dict[str, Any]:
     cfg = _cfg(state)
+    from recipe_opt_agent.shadow_gpt_candidate import force_include_shadow, is_shadow_candidate
+
+    shadow_patch = _await_shadow_candidate(state)
+    if shadow_patch:
+        state = {**state, **{k: v for k, v in shadow_patch.items() if not str(k).startswith("_")}}
+
     pool = list(state.get("candidate_pool") or [])
     interesting = list(state.get("interesting_candidates") or [])
     # Merge pool + interesting archive (OOD / hybrid / LLM shortlist / strong deltas).
@@ -2219,6 +2698,7 @@ def node_build_finalists(state: AgentState) -> dict[str, Any]:
     pool = sorted(
         pool,
         key=lambda p: (
+            0 if is_shadow_candidate(p) else 1,
             0 if p.get("branch") in {"ood_protein", "hybrid"} else 1,
             p.get("n_red", 99),
             p.get("L_max_norm", 99.0) if p.get("L_max_norm") is not None else 99.0,
@@ -2226,9 +2706,9 @@ def node_build_finalists(state: AgentState) -> dict[str, Any]:
             float(p.get("delta_L_star") or 0.0),
         ),
     )
-    max_n = max(int(cfg.max_finalists), 8)
-    pool = pool[:max_n]
-    return {
+    max_n = max(1, int(cfg.max_finalists))
+    pool = force_include_shadow(pool, max_n=max_n)
+    out: dict[str, Any] = {
         "finalist_pool": pool,
         "interesting_candidates": interesting,
         "tools_used": [
@@ -2244,6 +2724,18 @@ def node_build_finalists(state: AgentState) -> dict[str, Any]:
             }
         ],
     }
+    if shadow_patch:
+        if shadow_patch.get("candidate_pool") is not None:
+            out["candidate_pool"] = shadow_patch["candidate_pool"]
+        if shadow_patch.get("interesting_candidates") is not None:
+            out["interesting_candidates"] = shadow_patch["interesting_candidates"]
+        if "shadow_job_id" in shadow_patch:
+            out["shadow_job_id"] = shadow_patch["shadow_job_id"]
+        if shadow_patch.get("run_telemetry") is not None:
+            out["run_telemetry"] = shadow_patch["run_telemetry"]
+        if shadow_patch.get("_shadow_collect_meta") is not None:
+            out["_shadow_collect_meta"] = shadow_patch["_shadow_collect_meta"]
+    return out
 
 
 def node_pareto_and_rank(state: AgentState) -> dict[str, Any]:
@@ -2311,7 +2803,26 @@ def node_pareto_and_rank(state: AgentState) -> dict[str, Any]:
 
     scored = score_finalist_pool(entries, weights=cfg.score_weights())
     scored_dicts = [s.to_dict() for s in scored]
-    survivors, need_judge = top_survivors_for_judge(scored, epsilon=cfg.judge_epsilon)
+    survivors, need_judge = top_survivors_for_judge(
+        scored, epsilon=cfg.judge_epsilon, max_survivors=max(1, int(cfg.max_finalists))
+    )
+    shadow_scored = [s for s in scored if str(s.candidate_id).startswith("pool_shadow")]
+    if shadow_scored:
+        shadow = shadow_scored[0]
+        if not any(s.candidate_id == shadow.candidate_id for s in survivors):
+            survivors = list(survivors) + [shadow]
+            max_s = max(1, int(cfg.max_finalists))
+            if len(survivors) > max_s:
+                # Keep shadow + best non-shadow fillers.
+                others = [s for s in survivors if s.candidate_id != shadow.candidate_id]
+                survivors = [shadow] + others[: max_s - 1]
+        if len(survivors) >= 2:
+            need_judge = True
+    if not bool(getattr(cfg, "enable_llm_judge", False)):
+        need_judge = False
+    elif str(getattr(cfg, "llm_judge_mode", "demote_weird") or "demote_weird").lower() != "full":
+        # Demote-weird runs at finalize; no mid-graph ranking judge.
+        need_judge = False
     return {
         "scored_finalists": scored_dicts,
         "_need_judge": need_judge,
@@ -2334,19 +2845,19 @@ def node_pareto_and_rank(state: AgentState) -> dict[str, Any]:
 def node_judge_final(state: AgentState) -> dict[str, Any]:
     cfg = _cfg(state)
     survivors = state.get("_survivors") or state.get("scored_finalists") or []
-    need_judge = bool(state.get("_need_judge"))
+    need_judge = bool(state.get("_need_judge")) and bool(getattr(cfg, "enable_llm_judge", False))
     if not need_judge or len(survivors) <= 1:
         winner_id = survivors[0].get("candidate_id") if survivors else None
         return {
             "judge_result": {
                 "winner_id": winner_id,
-                "rationale": "Single survivor or clear composite winner",
+                "rationale": "LLM judge disabled — ranking by proportion quality",
                 "skipped": True,
             },
             "tools_used": [
                 {
                     "name": "judge_final",
-                    "purpose": "Skip LLM judge (no tie)",
+                    "purpose": "Skip LLM judge (disabled or no tie)",
                     "output_summary": {"winner_id": winner_id, "skipped": True},
                     "output": {"winner_id": winner_id},
                 }
@@ -2356,7 +2867,7 @@ def node_judge_final(state: AgentState) -> dict[str, Any]:
     ctx = {
         "user_request": state.get("user_request"),
         "requirement_tags": state.get("requirement_tags"),
-        "survivors": survivors,
+        "survivors": [_public_survivor(s) for s in survivors],
         "title": state.get("title"),
     }
     result, trace = judge_finalists_llm(ctx, model=select_judge_model(cfg))
@@ -2402,6 +2913,7 @@ def _route_after_pareto(state: AgentState) -> Literal["judge_final", "finalize"]
 def build_graph(checkpointer=None):
     g = StateGraph(AgentState)
     g.add_node("init", node_init)
+    g.add_node("shadow_gpt_candidate", node_shadow_gpt_candidate)
     g.add_node("diagnose", node_diagnose)
     g.add_node("save_candidate", node_save_candidate)
     g.add_node("save_moderate", node_save_moderate)
@@ -2411,7 +2923,8 @@ def build_graph(checkpointer=None):
     g.add_node("finalize", node_finalize)
 
     g.set_entry_point("init")
-    g.add_edge("init", "diagnose")
+    g.add_edge("init", "shadow_gpt_candidate")
+    g.add_edge("shadow_gpt_candidate", "diagnose")
     g.add_conditional_edges(
         "diagnose",
         _route_after_diagnose,
@@ -2448,6 +2961,7 @@ def build_creative_graph(checkpointer=None):
     g.add_node("deduce_tags", node_deduce_tags)
     g.add_node("llm_draft", node_llm_draft)
     g.add_node("ground_recipe", node_ground_recipe)
+    g.add_node("shadow_gpt_candidate", node_shadow_gpt_candidate)
     g.add_node("diagnose", node_diagnose)
     g.add_node("save_candidate", node_save_candidate)
     g.add_node("propose", node_propose)
@@ -2462,7 +2976,8 @@ def build_creative_graph(checkpointer=None):
     g.add_edge("init", "deduce_tags")
     g.add_edge("deduce_tags", "llm_draft")
     g.add_edge("llm_draft", "ground_recipe")
-    g.add_edge("ground_recipe", "diagnose")
+    g.add_edge("ground_recipe", "shadow_gpt_candidate")
+    g.add_edge("shadow_gpt_candidate", "diagnose")
     g.add_conditional_edges(
         "diagnose",
         _route_after_diagnose,
@@ -2512,6 +3027,7 @@ CREATIVE_FLOW_NODES = (
     "deduce_tags",
     "llm_draft",
     "ground_recipe",
+    "shadow_gpt_candidate",
     "diagnose",
     "save_candidate",
     "propose",
@@ -2527,7 +3043,8 @@ CREATIVE_FLOW_EDGES = (
     ("init", "deduce_tags"),
     ("deduce_tags", "llm_draft"),
     ("llm_draft", "ground_recipe"),
-    ("ground_recipe", "diagnose"),
+    ("ground_recipe", "shadow_gpt_candidate"),
+    ("shadow_gpt_candidate", "diagnose"),
     ("diagnose", "save_candidate"),
     ("diagnose", "propose"),
     ("diagnose", "build_finalists"),
@@ -2548,6 +3065,7 @@ CREATIVE_FLOW_EDGES = (
 # Node order used by UIs for flow highlighting.
 FLOW_NODES = (
     "init",
+    "shadow_gpt_candidate",
     "diagnose",
     "save_candidate",
     "propose",
@@ -2557,7 +3075,8 @@ FLOW_NODES = (
 )
 
 FLOW_EDGES = (
-    ("init", "diagnose"),
+    ("init", "shadow_gpt_candidate"),
+    ("shadow_gpt_candidate", "diagnose"),
     ("diagnose", "save_candidate"),
     ("diagnose", "propose"),
     ("diagnose", "finalize"),
@@ -2595,6 +3114,24 @@ FLOW_NODE_DOCS: dict[str, dict[str, Any]] = {
                     "Loads the selected canonical dish, builds or restores its FoodOn Jaccard neighborhood, "
                     "and picks the starting NLG recipe by L1 PFC (or loss projection). No LLM."
                 ),
+            },
+        ],
+    },
+    "shadow_gpt_candidate": {
+        "title": "Extra draft candidate",
+        "summary": "Quietly starts one additional optimized draft in the background for later comparison.",
+        "detail": (
+            "Kicks off an alternate gram-level draft (GPT-5.5 by default) from the user request, "
+            "dish title, and macro box on a background thread so diagnose/propose can proceed in "
+            "parallel. The job is joined before finalists / the final arbiter; the result is saved "
+            "as a pool entry and does not replace the working recipe. Authorship is not shown in "
+            "product UI."
+        ),
+        "compute": "llm_content",
+        "tools": [
+            {
+                "name": "shadow_optimized_draft",
+                "purpose": "Async draft → ground → LP; merge into candidate_pool before arbiter",
             },
         ],
     },
@@ -2930,6 +3467,8 @@ def _transcript_for_node(node: str, update: dict[str, Any]) -> list[dict[str, An
 
 def _step_payload(node: str, update: dict[str, Any]) -> dict[str, Any]:
     """UI-friendly payload: compact summary fields + full `detail` for dropdowns."""
+    from recipe_opt_agent.portion_display import build_progress_detail
+
     out: dict[str, Any] = {"node": node}
     if "fidelity_band" in update:
         out["fidelity_band"] = update["fidelity_band"]
@@ -3030,6 +3569,10 @@ def _step_payload(node: str, update: dict[str, Any]) -> dict[str, Any]:
     if "score_history" in update:
         out["score_history"] = update["score_history"]
 
+    progress_detail = build_progress_detail(node, update)
+    if progress_detail:
+        out["progress_detail"] = progress_detail
+
     # Full detail blob for dropdowns (includes tool outputs / prompts)
     detail: dict[str, Any] = {
         "update_keys": sorted(update.keys()),
@@ -3100,6 +3643,10 @@ def stream_agent(
                 "duration_ms": duration_ms,
                 "transcript": payload.get("transcript") or [],
             }
+            # Silent background candidate — still mutates state, but skip UI step noise.
+            if node == "shadow_gpt_candidate":
+                last_step_at = completed_at
+                continue
             if on_event:
                 on_event(event)
                 for entry in payload.get("transcript") or []:

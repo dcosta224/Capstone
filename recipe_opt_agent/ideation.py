@@ -61,6 +61,11 @@ Rules:
     (c) Never close a protein gap with yogurt, milk, ricotta, tofu, whey, or fried snacks
         when the dish is already savory meat/egg/cheese based.
     (d) Never ground "onion" to onion rings / fast-food items; never add coffee to bread.
+11. TASTE PREFERENCE: When user_request (or taste_preference) asks for a sensory or
+    lifestyle change — lighter/less oily, smokier, brighter/more lemon, milder heat,
+    weeknight-simpler, more garlicky — prefer edits that advance THAT preference while
+    still respecting macros and identity. Do not ignore the taste ask in favor of
+    macros-only hacks.
 
 Return ONLY JSON:
 {
@@ -184,6 +189,7 @@ def ideate_ingredient_edits(
     user = {
         "title": context.get("title"),
         "user_request": context.get("user_request") or context.get("taste_text"),
+        "taste_preference": context.get("taste_preference"),
         "identity_roles": context.get("identity_roles"),
         "requirement_tags": context.get("requirement_tags"),
         "fidelity_band": context.get("fidelity_band"),

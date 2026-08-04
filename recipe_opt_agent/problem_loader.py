@@ -187,17 +187,34 @@ def _ingredient_rows(ingredients) -> list[dict[str, Any]]:
         return rows
     for row in ingredients.itertuples(index=False):
         leaf = getattr(row, "foodon_id", None) or getattr(row, "foodon_leaf_id", None)
+        grams = float(getattr(row, "gram_weight", 0.0) or 0.0)
+        qty = getattr(row, "quantity", None)
+        unit = getattr(row, "unit", None)
+        try:
+            qty_f = float(qty) if qty is not None and str(qty).strip() != "" else None
+        except (TypeError, ValueError):
+            qty_f = None
+        unit_s = str(unit).strip() if unit is not None and str(unit).strip() else None
+        source_text = getattr(row, "ingredient", None) or getattr(row, "name", None)
         rows.append(
             {
                 "ingredient_idx": int(getattr(row, "ingredient_idx", 0) or 0),
                 "label": str(
                     getattr(row, "fdc_description", None)
-                    or getattr(row, "ingredient", None)
-                    or getattr(row, "name", "")
+                    or source_text
                     or ""
                 ),
+                "source_text": str(source_text).strip() if source_text else None,
                 "fdc_id": int(row.fdc_id) if getattr(row, "fdc_id", None) is not None else None,
-                "grams": float(getattr(row, "gram_weight", 0.0) or 0.0),
+                "grams": grams,
+                # Preserve resolved source portions so the product UI can show
+                # cups/tbsp/etc. scaled after LP gram reweighting.
+                "original_grams": grams,
+                "quantity": qty_f,
+                "unit": unit_s,
+                "portion_label": (
+                    str(getattr(row, "portion_label", "") or "").strip() or None
+                ),
                 "foodon_id": str(leaf) if leaf else None,
             }
         )
@@ -288,6 +305,236 @@ def _batch_recipe_pfc_from_lines(lines_df) -> dict[str, dict[str, float]]:
     return out
 
 
+def _box_midpoint(
+    *,
+    protein_min: float,
+    protein_max: float,
+    carb_min: float,
+    carb_max: float,
+    fat_min: float,
+    fat_max: float,
+) -> tuple[float, float, float]:
+    p = 0.5 * (float(protein_min) + float(protein_max))
+    c = 0.5 * (float(carb_min) + float(carb_max))
+    f = 0.5 * (float(fat_min) + float(fat_max))
+    s = p + c + f
+    if s <= 1e-12:
+        return (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+    return p / s, c / s, f / s
+
+
+def _pfc_in_macro_box(
+    p: float,
+    c: float,
+    f: float,
+    *,
+    protein_min: float,
+    protein_max: float,
+    carb_min: float,
+    carb_max: float,
+    fat_min: float,
+    fat_max: float,
+) -> bool:
+    return (
+        float(protein_min) - 1e-9 <= float(p) <= float(protein_max) + 1e-9
+        and float(carb_min) - 1e-9 <= float(c) <= float(carb_max) + 1e-9
+        and float(fat_min) - 1e-9 <= float(f) <= float(fat_max) + 1e-9
+    )
+
+
+def _l1_to_box_projection(
+    p: float,
+    c: float,
+    f: float,
+    *,
+    protein_min: float,
+    protein_max: float,
+    carb_min: float,
+    carb_max: float,
+    fat_min: float,
+    fat_max: float,
+) -> float:
+    """L1 distance from PFC to its projection onto the axis-aligned macro box.
+
+    For points outside the box this is distance to the nearest face/edge/corner
+    of the target (after a light simplex renormalization of the projection).
+    """
+    p_t = min(max(float(p), float(protein_min)), float(protein_max))
+    c_t = min(max(float(c), float(carb_min)), float(carb_max))
+    f_t = min(max(float(f), float(fat_min)), float(fat_max))
+    s = p_t + c_t + f_t
+    if s > 0:
+        p_t, c_t, f_t = p_t / s, c_t / s, f_t / s
+    return float(abs(float(p) - p_t) + abs(float(c) - c_t) + abs(float(f) - f_t))
+
+
+def _l1_to_midpoint(
+    p: float,
+    c: float,
+    f: float,
+    *,
+    protein_min: float,
+    protein_max: float,
+    carb_min: float,
+    carb_max: float,
+    fat_min: float,
+    fat_max: float,
+) -> float:
+    mp, mc, mf = _box_midpoint(
+        protein_min=protein_min,
+        protein_max=protein_max,
+        carb_min=carb_min,
+        carb_max=carb_max,
+        fat_min=fat_min,
+        fat_max=fat_max,
+    )
+    return float(abs(float(p) - mp) + abs(float(c) - mc) + abs(float(f) - mf))
+
+
+def pick_neighborhood_recipe_for_macro_box(
+    pfc_by_rid: dict[str, dict[str, float]],
+    recipe_ids: list[Any],
+    *,
+    protein_min: float,
+    protein_max: float,
+    carb_min: float,
+    carb_max: float,
+    fat_min: float,
+    fat_max: float,
+    default_id: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Pick a human neighborhood recipe as the nutrition reference for the target box.
+
+    - If ≥1 resolved recipe sits inside the box → closest (L1) to the box midpoint.
+    - Else → closest (L1) to the nearest point on the box boundary (edge/face).
+    """
+    mid = _box_midpoint(
+        protein_min=protein_min,
+        protein_max=protein_max,
+        carb_min=carb_min,
+        carb_max=carb_max,
+        fat_min=fat_min,
+        fat_max=fat_max,
+    )
+    in_box: list[dict[str, Any]] = []
+    out_box: list[dict[str, Any]] = []
+    ranked: list[dict[str, Any]] = []
+
+    for rid in recipe_ids:
+        rid_s = str(rid)
+        pfc = pfc_by_rid.get(rid_s)
+        if not pfc:
+            ranked.append({"recipe_nlg_id": rid_s, "error": "no_pfc"})
+            continue
+        p, c, f = float(pfc["protein"]), float(pfc["carbs"]), float(pfc["fat"])
+        inside = _pfc_in_macro_box(
+            p,
+            c,
+            f,
+            protein_min=protein_min,
+            protein_max=protein_max,
+            carb_min=carb_min,
+            carb_max=carb_max,
+            fat_min=fat_min,
+            fat_max=fat_max,
+        )
+        if inside:
+            dist = _l1_to_midpoint(
+                p,
+                c,
+                f,
+                protein_min=protein_min,
+                protein_max=protein_max,
+                carb_min=carb_min,
+                carb_max=carb_max,
+                fat_min=fat_min,
+                fat_max=fat_max,
+            )
+            row = {
+                "recipe_nlg_id": rid_s,
+                "pfc": pfc,
+                "in_box": True,
+                "distance_to_midpoint": dist,
+                "distance_to_target_box": 0.0,
+            }
+            in_box.append(row)
+        else:
+            dist = _l1_to_box_projection(
+                p,
+                c,
+                f,
+                protein_min=protein_min,
+                protein_max=protein_max,
+                carb_min=carb_min,
+                carb_max=carb_max,
+                fat_min=fat_min,
+                fat_max=fat_max,
+            )
+            row = {
+                "recipe_nlg_id": rid_s,
+                "pfc": pfc,
+                "in_box": False,
+                "distance_to_midpoint": _l1_to_midpoint(
+                    p,
+                    c,
+                    f,
+                    protein_min=protein_min,
+                    protein_max=protein_max,
+                    carb_min=carb_min,
+                    carb_max=carb_max,
+                    fat_min=fat_min,
+                    fat_max=fat_max,
+                ),
+                "distance_to_target_box": dist,
+            }
+            out_box.append(row)
+        ranked.append(row)
+
+    if in_box:
+        pool = in_box
+        mode = "closest_to_midpoint_in_box"
+        key = "distance_to_midpoint"
+    elif out_box:
+        pool = out_box
+        mode = "closest_to_box_edge"
+        key = "distance_to_target_box"
+    else:
+        fallback = str(default_id or (recipe_ids[0] if recipe_ids else ""))
+        return fallback, {
+            "method": "l1_pfc_to_target_box",
+            "selection_mode": "fallback_empty",
+            "chosen_recipe_nlg_id": fallback,
+            "distance_to_target_box": None,
+            "distance_to_midpoint": None,
+            "chosen_pfc": None,
+            "n_in_box": 0,
+            "target_midpoint": {"protein": mid[0], "carbs": mid[1], "fat": mid[2]},
+            "scored": ranked[:20],
+            "n_scored": 0,
+        }
+
+    pool.sort(key=lambda r: (float(r[key]), str(r["recipe_nlg_id"])))
+    best = pool[0]
+    best_id = str(best["recipe_nlg_id"])
+    ranked_sorted = sorted(
+        [r for r in ranked if key in r],
+        key=lambda r: (float(r.get(key, 99.0)), str(r["recipe_nlg_id"])),
+    )
+    return best_id, {
+        "method": "l1_pfc_to_target_box",
+        "selection_mode": mode,
+        "chosen_recipe_nlg_id": best_id,
+        "distance_to_target_box": best.get("distance_to_target_box"),
+        "distance_to_midpoint": best.get("distance_to_midpoint"),
+        "chosen_pfc": best.get("pfc"),
+        "n_in_box": len(in_box),
+        "n_out_box": len(out_box),
+        "target_midpoint": {"protein": mid[0], "carbs": mid[1], "fat": mid[2]},
+        "scored": ranked_sorted[:20],
+        "n_scored": len(ranked_sorted),
+    }
+
+
 def _pick_start_l1_pfc(
     nb,
     *,
@@ -298,52 +545,22 @@ def _pick_start_l1_pfc(
     fat_min: float,
     fat_max: float,
 ) -> tuple[str, dict[str, Any]]:
-    """Pick neighborhood recipe with smallest L1 PFC distance to the target box (batch nutrients)."""
+    """Pick neighborhood recipe closest to the target box midpoint (in-box) or edge."""
     pfc_by_rid = _batch_recipe_pfc_from_lines(nb.lines_df)
-    ranked: list[dict[str, Any]] = []
-    best_id = str(nb.starting_recipe_id)
-    best_dist = float("inf")
-    best_pfc: dict[str, float] | None = None
-
-    for rid in nb.recipe_ids:
-        rid_s = str(rid)
-        pfc = pfc_by_rid.get(rid_s)
-        if not pfc:
-            ranked.append({"recipe_nlg_id": rid_s, "error": "no_pfc"})
-            continue
-        # Reconstruct grams-ish for distance helper via reverse of fractions is awkward —
-        # compute L1 directly on fractions.
-        p, c, f = pfc["protein"], pfc["carbs"], pfc["fat"]
-        p_t = min(max(p, protein_min), protein_max)
-        c_t = min(max(c, carb_min), carb_max)
-        f_t = min(max(f, fat_min), fat_max)
-        s = p_t + c_t + f_t
-        if s > 0:
-            p_t, c_t, f_t = p_t / s, c_t / s, f_t / s
-        dist = float(abs(p - p_t) + abs(c - c_t) + abs(f - f_t))
-        ranked.append(
-            {
-                "recipe_nlg_id": rid_s,
-                "pfc": pfc,
-                "distance_to_target_box": dist,
-            }
-        )
-        if dist < best_dist - 1e-12 or (abs(dist - best_dist) <= 1e-12 and rid_s < best_id):
-            best_dist = dist
-            best_id = rid_s
-            best_pfc = pfc
-
-    ranked.sort(key=lambda r: (r.get("distance_to_target_box") is None, r.get("distance_to_target_box", 99.0)))
-    return best_id, {
-        "method": "l1_pfc_to_target_box",
-        "chosen_recipe_nlg_id": best_id,
-        "distance_to_target_box": None if best_dist == float("inf") else best_dist,
-        "chosen_pfc": best_pfc,
-        "scored": ranked[:20],
-        "n_scored": len([r for r in ranked if "distance_to_target_box" in r]),
-        "default_build_start": str(nb.starting_recipe_id),
-        "switched_from_default": best_id != str(nb.starting_recipe_id),
-    }
+    best_id, meta = pick_neighborhood_recipe_for_macro_box(
+        pfc_by_rid,
+        list(nb.recipe_ids or []),
+        protein_min=protein_min,
+        protein_max=protein_max,
+        carb_min=carb_min,
+        carb_max=carb_max,
+        fat_min=fat_min,
+        fat_max=fat_max,
+        default_id=str(nb.starting_recipe_id),
+    )
+    meta["default_build_start"] = str(nb.starting_recipe_id)
+    meta["switched_from_default"] = best_id != str(nb.starting_recipe_id)
+    return best_id, meta
 
 
 def _loss_projection_in_box(
@@ -827,6 +1044,7 @@ def load_canonical_problem(
     start_metric: str = "l1_pfc",
     fast_neighborhood: bool = True,
     max_foodon_aggregation_levels: int | None = None,
+    require_cache: bool = False,
 ) -> dict[str, Any]:
     from canonical_optimization import CanonicalNeighborhood
     from weighted_empirical_opt import (
@@ -841,6 +1059,7 @@ def load_canonical_problem(
         canonical_id,
         fast=fast_neighborhood,
         use_cache=True,
+        require_cache=require_cache,
     )
     selection_meta: dict[str, Any] = {
         "method": "default_foodon_hit_start",
@@ -984,7 +1203,9 @@ def load_canonical_problem(
             "selection": selection_meta,
             "selection_note": (
                 "Canonical dish chosen from match-ranked search (defines the FoodOn neighborhood). "
-                "Starting NLG recipe is picked by start_metric (l1_pfc or loss_projection). "
+                "Starting NLG recipe is the neighborhood recipe closest to the macro target: "
+                "midpoint if any recipe is in-box, otherwise nearest box edge "
+                f"(start_metric={start_metric}). "
                 + build_note
             ),
         },
@@ -1032,6 +1253,17 @@ def load_canonical_problem(
                 "carbs": float(mean_pfc[1]),
                 "fat": float(mean_pfc[2]),
             }
+    except Exception:
+        pass
+    try:
+        from recipe_opt_agent.example_recipe import (
+            attach_example_recipe_to_problem,
+            example_from_problem_start,
+        )
+
+        example = example_from_problem_start(problem)
+        if example:
+            problem = attach_example_recipe_to_problem(problem, example)
     except Exception:
         pass
     return problem

@@ -73,6 +73,8 @@ Same idea as CI; CI is the normal path on `deployment`.
 ### Image contents
 
 - FastAPI app: `uvicorn recipe_opt_web.server:app` on port **8000** (recipe optimization agent UI)
+- **Default page `/`:** MacroIQ product UI (`recipe_opt_web/static/macroiq.html` + `macroiq.css` / `macroiq.js`)
+- **Playground `/playground`:** developer flow-graph UI (`static/index.html`)
 - Health: `GET /health`
 - Runtime deps only (`uv sync --frozen --no-dev`) — no notebook/pipeline/mvp extras
 - FoodOn caches baked in: `foodon_web/cache/{foodon_index,foodon_hierarchy,fdc_foodon_map}.json`

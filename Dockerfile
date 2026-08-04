@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 # Recipe optimization agent image (CPU-only PyTorch). See pyproject.toml [tool.uv.sources].
 # Installs main deps only: `uv sync --frozen --no-dev` (no notebook/pipeline/mvp extras).
+#
+# UI: recipe_opt_web serves MacroIQ at `/` (static/macroiq.html + .css/.js).
+# Developer playground remains at `/playground` (static/index.html).
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 
@@ -18,7 +21,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY recipe_opt_agent/ recipe_opt_agent/
+# Includes MacroIQ product UI (static/macroiq.*) and playground (static/index.html).
 COPY recipe_opt_web/ recipe_opt_web/
+# Optional schema bootstrap for MacroIQ run logging (mvp_logs.macroiq_runs).
+RUN mkdir -p sql
+COPY sql/43_create_macroiq_runs.sql sql/43_create_macroiq_runs.sql
 # Agent runtime modules under scripts/ (PYTHONPATH). Avoid shipping the whole
 # scripts tree so pipeline/notebook helpers stay out of the image.
 COPY scripts/db.py \

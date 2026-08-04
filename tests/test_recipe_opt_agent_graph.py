@@ -223,3 +223,21 @@ def test_agent_moderate_or_retry_with_candidates():
         config=cfg,
     )
     assert result.get("status") is not None
+
+
+def test_route_after_diagnose_blocks_accept_on_iter_0():
+    from recipe_opt_agent.graph import _route_after_decide, _route_after_diagnose
+
+    state0 = {
+        "fidelity_band": "accept",
+        "iteration": 0,
+        "config": {"max_iterations": 3},
+        "agent_mode": "neighborhood",
+        "decision": {"action": "accept"},
+    }
+    assert _route_after_diagnose(state0) == "propose"
+    assert _route_after_decide(state0) == "apply"
+
+    state1 = {**state0, "iteration": 1}
+    assert _route_after_diagnose(state1) == "finalize"
+    assert _route_after_decide(state1) == "finalize"

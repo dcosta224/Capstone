@@ -30,6 +30,17 @@ def test_iqr_zone_green_yellow_red():
     assert z == Zone.RED
 
 
+def test_iqr_zone_degenerate_zero_width_not_penalized():
+    # All samples identical → zero-width band; far-off values must not go red.
+    samples = np.array([0.35, 0.35, 0.35, 0.35, 0.35])
+    z, med, q25, q75, ln = iqr_zone(0.10, samples)
+    assert z == Zone.GREEN
+    assert ln == 0.0
+    assert q25 == q75
+    z2, *_rest = iqr_zone(0.90, samples)
+    assert z2 == Zone.GREEN
+
+
 def test_classify_bands():
     assert classify_fidelity_band(L_max_norm=0.5, n_red=0, macros_feasible=True, hull_intersects=True, identity_critical_red=False) == FidelityBand.ACCEPT
     assert classify_fidelity_band(L_max_norm=1.2, n_red=0, macros_feasible=True, hull_intersects=True, identity_critical_red=False) == FidelityBand.MODERATE

@@ -1,4 +1,4 @@
-"""Tests that the web server surfaces neighborhood cache status."""
+"""Tests that the web server prefers neighborhood cache and falls back live on miss."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def test_run_endpoint_reports_cache_hit(monkeypatch):
     assert "Jaccard cache hit" in selected["message"]
 
 
-def test_run_endpoint_reports_cache_miss(monkeypatch):
+def test_run_endpoint_allows_live_rebuild_on_cache_miss(monkeypatch):
     from fastapi.testclient import TestClient
 
     from recipe_opt_web import server
@@ -89,8 +89,13 @@ def test_run_endpoint_reports_cache_miss(monkeypatch):
             },
         },
     }
+    seen: dict = {}
 
-    monkeypatch.setattr(server, "load_canonical_problem", lambda *args, **kwargs: fake_problem)
+    def _load(*args, **kwargs):
+        seen["require_cache"] = kwargs.get("require_cache")
+        return fake_problem
+
+    monkeypatch.setattr(server, "load_canonical_problem", _load)
     monkeypatch.setattr(
         server,
         "run_recipe_opt_agent",
@@ -108,9 +113,12 @@ def test_run_endpoint_reports_cache_miss(monkeypatch):
     )
     assert res.status_code == 200
     events = _collect_sse_events(res)
+    assert not any(e.get("type") == "error" for e in events)
     selected = next(e for e in events if e.get("phase") == "selected_start")
     assert selected["neighborhood_from_cache"] is False
-    assert "cache miss" in selected["message"]
+    assert "live neighborhood rebuild" in selected["message"]
+    assert seen.get("require_cache") is False
+    assert any(e.get("type") == "result" for e in events)
 
 
 def test_flow_api_includes_tools_and_edge_lists():

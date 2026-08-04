@@ -391,13 +391,19 @@ def llm_draft_recipe(
     *,
     macro_box: dict | None = None,
     example_recipe: dict | None = None,
+    canonical_title: str | None = None,
+    kcal_target: float | None = None,
     model: str = "gpt-4.1-mini",
     temperature: float | None = 0.2,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     data, trace = _call_json_llm(
         system=DRAFT_SYSTEM_PROMPT,
         user=draft_user_message(
-            request, macro_box=macro_box, example_recipe=example_recipe
+            request,
+            macro_box=macro_box,
+            example_recipe=example_recipe,
+            canonical_title=canonical_title,
+            kcal_target=kcal_target,
         ),
         model=model,
         temperature=temperature,

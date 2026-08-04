@@ -83,6 +83,7 @@ Macro box semantics:
 
 Rules:
 - Keep the ingredients that define the dish's identity present (e.g. carbonara must keep pasta, egg, hard cheese, cured pork unless a dietary tag forbids one).
+- When a reference neighborhood recipe is provided, treat it as the human base: preserve its lines and roles whenever possible and make the fewest ingredient changes needed to hit the request and macro box.
 - Gram amounts must be realistic per single serving.
 - Set requirement_tags for dietary restrictions AND macro intent inferred from the request (e.g. high_protein, low_carb).
 - Return ONLY valid JSON with: title, servings, requirement_tags, ingredients (name, grams, role, notes), notes.
@@ -152,6 +153,8 @@ def draft_user_message(
     *,
     macro_box: dict | None = None,
     example_recipe: dict | None = None,
+    canonical_title: str | None = None,
+    kcal_target: float | None = None,
 ) -> str:
     import json
 
@@ -172,6 +175,21 @@ def draft_user_message(
             "(remember: protein 4 kcal/g, carb 4 kcal/g, fat 9 kcal/g; fractions sum to 1). "
             "The optimizer will only re-scale ingredients you include, so make sure the set can reach the box.\n"
         )
+    if kcal_target is not None and float(kcal_target) > 0:
+        guidance += (
+            f"\nPer-serving calorie target: {float(kcal_target):.0f} kcal (HARD CONSTRAINT). "
+            "Choose starting grams so the draft's total Atwater calories are near this target. "
+            "The optimizer will re-scale to hit it exactly — do not draft a multi-serving or "
+            "family-size recipe when a single-serving calorie target is given.\n"
+        )
+
+    title_block = ""
+    title = (canonical_title or "").strip()
+    if title:
+        title_block = (
+            f"Canonical recipe title: {title}\n"
+            "Treat this as the dish identity to preserve while meeting the request and macros.\n\n"
+        )
 
     example_block = ""
     if example_recipe:
@@ -180,18 +198,34 @@ def draft_user_message(
             {"name": r.get("label") or r.get("name"), "grams": r.get("grams")}
             for r in ings[:20]
         ]
+        sel = example_recipe.get("selection") or {}
+        mode = sel.get("selection_mode") or ""
+        why = (
+            "closest in nutrition to the middle of your macro target"
+            if mode == "closest_to_midpoint_in_box"
+            else "closest in nutrition to the edge of your macro target (target sits outside typical neighborhood recipes)"
+            if mode == "closest_to_box_edge"
+            else "closest in nutrition to your macro target among neighborhood recipes"
+        )
         example_block = (
-            "\nExample recipe from this dish's neighborhood (closest nutritionally to the "
-            "target box among strong semantic matches). Use it as a structural starting "
-            "point — keep dish identity, but adapt ingredients/grams toward the macro box "
-            "(e.g. leaner protein, less fat/carb fillers as needed):\n"
+            "\nReference recipe from this dish's neighborhood "
+            f"({why}). Treat it as the human starting point — keep its ingredient set "
+            "and structure whenever possible, and make the fewest changes needed to meet "
+            "the request and macro box (swap/add only when necessary; prefer re-scaling "
+            "existing lines):\n"
             f"  title: {example_recipe.get('title')}\n"
             f"  pfc: {json.dumps(example_recipe.get('pfc') or {})}\n"
             f"  ingredients: {json.dumps(compact, indent=2)}\n"
         )
 
+    kcal_line = ""
+    if kcal_target is not None and float(kcal_target) > 0:
+        kcal_line = f"Per-serving calorie target: {float(kcal_target):.0f} kcal\n"
+
     return (
+        f"{title_block}"
         f"User request:\n{request}\n\n"
+        f"{kcal_line}"
         f"Target macro box (calorie fractions): {json.dumps(box, indent=2)}\n"
         f"{guidance}"
         f"{example_block}\n"

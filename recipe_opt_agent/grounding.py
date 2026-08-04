@@ -48,6 +48,8 @@ class GroundingReport:
     substituted: list[dict[str, Any]] = field(default_factory=list)
     unresolved: list[dict[str, Any]] = field(default_factory=list)
     weak_match: list[dict[str, Any]] = field(default_factory=list)
+    dequant_cache_used: bool = False
+    dequant_cache_hits: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +57,8 @@ class GroundingReport:
             "substituted": self.substituted,
             "unresolved": self.unresolved,
             "weak_match": self.weak_match,
+            "dequant_cache_used": self.dequant_cache_used,
+            "dequant_cache_hits": self.dequant_cache_hits,
         }
 
 
@@ -119,8 +123,13 @@ def resolve_line_to_fdc(
     tags: list[RequirementTag],
     neighborhood_min_score: float = DEFAULT_NEIGHBORHOOD_MIN_SCORE,
     broader_min_score: float = DEFAULT_BROADER_MIN_SCORE,
+    dequant_cache: Any | None = None,
 ) -> GroundedLine:
-    """Neighborhood FDC first, then broader catalog — with culinary-type gates."""
+    """Neighborhood FDC first, then broader catalog — with culinary-type gates.
+
+    When ``dequant_cache`` is provided, try a dequant-cache hit first (mass stem
+    match for gram drafts; exact/volume-stem for non-mass).
+    """
     if not ingredient_passes_tags(line.name, tags):
         return GroundedLine(
             name=line.name,
@@ -131,6 +140,26 @@ def resolve_line_to_fdc(
             status="unresolved",
             notes="draft line violates requirement tags",
         )
+
+    if dequant_cache is not None:
+        try:
+            hit = dequant_cache.lookup(line.name, grams=line.grams)
+        except Exception:
+            hit = None
+        if hit is not None and hit.fdc_id is not None:
+            return GroundedLine(
+                name=line.name,
+                grams=line.grams,
+                role=line.role,
+                fdc_id=int(hit.fdc_id),
+                label=str(hit.description or line.name),
+                status="matched",
+                notes=(
+                    f"dequant_cache:{hit.match_mode} key={hit.cache_key!r} "
+                    f"score={hit.score:.3f}"
+                ),
+                match_score=float(hit.score),
+            )
 
     hit, score = _search_catalog(
         line.name, neighborhood_catalog, tags, min_score=neighborhood_min_score
@@ -338,6 +367,9 @@ def _build_offline_stub_problem(
             "label": g.label or g.name,
             "fdc_id": g.fdc_id,
             "grams": g.grams,
+            "original_grams": g.grams,
+            "quantity": None,
+            "unit": None,
         }
         for i, g in enumerate(resolved)
     ]
@@ -371,6 +403,8 @@ def ground_draft_to_problem(
     ratio_samples: list[float] | None = None,
     retrieval_context: dict[str, Any] | None = None,
     offline: bool = False,
+    use_dequant_cache: bool = True,
+    dequant_cache: Any | None = None,
 ) -> tuple[dict[str, Any], GroundingReport, dict[str, Any]]:
     """Ground draft → problem dict + report + chosen_recipe."""
     if not isinstance(draft, RecipeDraft):
@@ -381,7 +415,20 @@ def ground_draft_to_problem(
     if not broad and retrieval_context:
         broad = list(retrieval_context.get("fdc_catalog") or [])
 
-    report = GroundingReport()
+    cache = dequant_cache
+    dequant_load_error: str | None = None
+    # Always prefer the dequant LLM cache when enabled — including offline creative —
+    # so curated FDC judgments are used before catalog / synthetic fallbacks.
+    if cache is None and use_dequant_cache:
+        try:
+            from eval_fdc_grounding_ui.draft_cache import DraftDequantCache
+
+            cache = DraftDequantCache()
+        except Exception as exc:
+            cache = None
+            dequant_load_error = str(exc)
+
+    report = GroundingReport(dequant_cache_used=cache is not None)
     grounded: list[GroundedLine] = []
 
     for ing in draft.ingredients:
@@ -392,7 +439,10 @@ def ground_draft_to_problem(
             neighborhood_catalog=nb_cat,
             broader_catalog=broad,
             tags=requirement_tags,
+            dequant_cache=cache,
         )
+        if gl.notes.startswith("dequant_cache:"):
+            report.dequant_cache_hits += 1
         # Offline / empty-catalog fallback: keep tag-compliant lines with synthetic FDC.
         if gl.status == "unresolved" and (offline or not nb_cat and not broad):
             synth = _assign_synthetic_fdc(ing, requirement_tags)
@@ -409,6 +459,16 @@ def ground_draft_to_problem(
             report.unresolved.append(row)
         else:
             report.unresolved.append(row)
+
+    if dequant_load_error and use_dequant_cache:
+        # Keep a breadcrumb for UI / tools without failing the run.
+        report.unresolved.append(
+            {
+                "name": "_dequant_cache",
+                "status": "cache_load_error",
+                "notes": dequant_load_error,
+            }
+        )
 
     # If still nothing resolved but we have tag-ok draft lines, force synthetic grounding.
     if not any(g.fdc_id is not None for g in grounded):
@@ -447,6 +507,9 @@ def ground_draft_to_problem(
             "label": r["label"],
             "fdc_id": r["fdc_id"],
             "grams": r["grams"],
+            "original_grams": r["grams"],
+            "quantity": None,
+            "unit": None,
         }
         for i, r in enumerate(resolved_rows)
     ]

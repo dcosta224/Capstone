@@ -21,8 +21,17 @@ class AgentConfig:
     model: str = "gpt-4o-mini"
     model_escalate: str = "gpt-4.1-mini"
     creative_model: str = "gpt-4.1-mini"
+    # Silent one-shot draft→optimize candidate (not shown as authored by this model).
+    shadow_draft_model: str = "gpt-5.5"
+    enable_shadow_gpt_candidate: bool = True
     tags_model: str = "gpt-4.1-nano"
     judge_model: str = "gpt-4.1-mini"
+    # LLM judge screens for clash / obviously-bad ingredient lists and demotes
+    # those recipes to the end. Ordering among normal recipes stays deterministic
+    # (proportion quality). Set False to skip the LLM call entirely.
+    enable_llm_judge: bool = True
+    # demote_weird: flag clashes only (default). full: old arbiter picks a winner.
+    llm_judge_mode: str = "demote_weird"
     max_iterations: int = 3
     F_accept: float = 1.0
     F_max: float = 1.5
@@ -32,6 +41,8 @@ class AgentConfig:
     carb_max: float = 0.545
     fat_min: float = 0.245
     fat_max: float = 0.445
+    # Optional absolute calorie target (Atwater). Propagated into drafts + LP.
+    kcal_target: float | None = None
     # Dimensionless weight on L1 PFC box violation. None restores hard bounds.
     nutrition_slack_weight: float | None = 1.0
     neighbor_k: int = 40
@@ -48,7 +59,7 @@ class AgentConfig:
     judge_epsilon: float = 0.03
     save_on_must_retry_feasible: bool = True
     min_finalists: int = 2
-    max_finalists: int = 5
+    max_finalists: int = 4
     agent_mode: str = "neighborhood"  # neighborhood | creative
     # Auto-apply clear LP favorite
     auto_apply_delta_eps: float = 0.01

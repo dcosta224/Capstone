@@ -34,9 +34,60 @@ NUTRIENT_LOSS_BANDS = {
     "prior_p90": 0.06,
 }
 
-SHARE_LOSS_BANDS = {
-    "good_max": 0.05,
-    "warn_max": 0.15,
+RATIO_BAND_SUMMARY = {
+    "good": "Proportions are very typical.",
+    "warn": "Proportions are somewhat different.",
+    "bad": "Proportions are substantially off.",
+    "unknown": "Typicality could not be scored for this recipe.",
+}
+
+# Outside-central-band calorie share → user-facing typicality (primary MacroIQ copy).
+# Thresholds are on calorie-weighted fraction of basis groups outside the P15–P85 band.
+PROPORTION_TYPICALITY = {
+    "very_typical": {
+        "max_outside": 0.17,
+        "summary": "Proportions are very typical.",
+        "band": "good",
+        "css": "very-typical",
+    },
+    "mostly_typical": {
+        "max_outside": 0.25,
+        "summary": "Proportions are mostly typical.",
+        "band": "good",
+        "css": "mostly-typical",
+    },
+    "somewhat_different": {
+        "max_outside": 0.35,
+        "summary": "Proportions are somewhat different.",
+        "band": "warn",
+        "css": "somewhat-different",
+    },
+    # Legacy alias kept so older payloads / CSS still resolve.
+    "somewhat_unusual": {
+        "max_outside": 0.35,
+        "summary": "Proportions are somewhat different.",
+        "band": "warn",
+        "css": "somewhat-different",
+    },
+    "substantially_off": {
+        "max_outside": 1.01,
+        "summary": "Proportions are substantially off.",
+        "band": "bad",
+        "css": "substantially-off",
+    },
+    "unknown": {
+        "max_outside": None,
+        "summary": "Typicality could not be scored for this recipe.",
+        "band": "unknown",
+        "css": "unknown",
+    },
+}
+
+NUTRIENT_BAND_SUMMARY = {
+    "good": "Protein, carbs, and fat land inside your target ranges.",
+    "warn": "Macros are close to your targets, with a small miss.",
+    "bad": "Macros sit meaningfully outside your target ranges.",
+    "unknown": "Macro fit could not be scored for this recipe.",
 }
 
 
@@ -80,6 +131,7 @@ def empty_display_scores() -> dict[str, Any]:
             "direction": "lower_better",
             "unit": "surrogate",
             "explanation": "Neighborhood pasta∶egg ratio surrogate (lower better).",
+            "band_summary": RATIO_BAND_SUMMARY["unknown"],
             "thresholds": dict(RATIO_LOSS_BANDS),
             "source": None,
         },
@@ -90,6 +142,7 @@ def empty_display_scores() -> dict[str, Any]:
             "direction": "lower_better",
             "unit": "pfc_slack",
             "explanation": "L1 calorie-fraction distance outside the protein/carb/fat box.",
+            "band_summary": NUTRIENT_BAND_SUMMARY["unknown"],
             "thresholds": dict(NUTRIENT_LOSS_BANDS),
             "source": None,
         },
@@ -102,6 +155,19 @@ def empty_display_scores() -> dict[str, Any]:
             "source": None,
             "explanation": "LLM judge score 0–10 when available.",
         },
+        "macros": {
+            "protein": None,
+            "carb": None,
+            "fat": None,
+            "calories": None,
+        },
+        "pfc_after": None,
+        "cookability": {
+            "improved": False,
+            "improved_pct": None,
+            "summary": None,
+        },
+        "applied_edits": [],
         "ingredients": [],
         "score_history": [],
         "status": None,
@@ -382,19 +448,67 @@ def _percentile(sorted_vals: list[float], q: float) -> float:
 
 
 def _iqr_stats(samples: list[float] | None) -> dict[str, float] | None:
+    """Neighborhood share band for MacroIQ boxplots / typicality.
+
+    ``q1``/``q3`` are the **P15 / P85** edges of the central band (not classical
+    quartiles). Tukey fences still use 1.5× that band width. Sparse samples
+    (n < 5) are marked via ``n`` and excluded from proportion fit elsewhere.
+    """
     if not samples:
         return None
     vals = sorted(float(x) for x in samples if x is not None)
     if not vals:
         return None
+    p15 = _percentile(vals, 0.15)
+    p85 = _percentile(vals, 0.85)
     return {
         "min": float(vals[0]),
-        "q1": _percentile(vals, 0.25),
+        "q1": float(p15),
+        "p15": float(p15),
         "median": _percentile(vals, 0.50),
-        "q3": _percentile(vals, 0.75),
+        "q3": float(p85),
+        "p85": float(p85),
         "max": float(vals[-1]),
         "n": float(len(vals)),
     }
+
+
+def share_band_from_iqr(
+    recipe_share: float | None,
+    iqr: dict[str, Any] | None,
+    *,
+    whisker: float = 1.5,
+    min_n: float = 5,
+    edge_eps: float = 0.01,
+) -> str:
+    """Color band from share vs neighborhood central band (P15–P85) + Tukey fences.
+
+    - good: inside [p15, p85], or within ``edge_eps`` of either edge
+    - warn: strictly outside that softened band but within Tukey fences
+    - bad: beyond the fences (boxplot outliers)
+    - unknown: missing / too-sparse neighborhood stats (does not affect proportion fit)
+    """
+    share = _as_float(recipe_share)
+    if share is None or not isinstance(iqr, dict):
+        return "unknown"
+    q1 = _as_float(iqr.get("q1"))
+    q3 = _as_float(iqr.get("q3"))
+    if q1 is None or q3 is None:
+        return "unknown"
+    n = _as_float(iqr.get("n"))
+    if n is not None and n < min_n:
+        return "unknown"
+    width = max(float(q3) - float(q1), 1e-9)
+    fence_lo = float(q1) - whisker * width
+    fence_hi = float(q3) + whisker * width
+    # Soften the box edges so floating shares sitting on q1/q3 stay green.
+    box_lo = float(q1) - float(edge_eps)
+    box_hi = float(q3) + float(edge_eps)
+    if box_lo <= share <= box_hi:
+        return "good"
+    if fence_lo <= share <= fence_hi:
+        return "warn"
+    return "bad"
 
 
 def _calories_for_column(M: np.ndarray, i: int, grams: float) -> float | None:
@@ -411,6 +525,69 @@ def _calories_for_column(M: np.ndarray, i: int, grams: float) -> float | None:
     return atw if col.size >= 3 else None
 
 
+def _format_amount(value: float, unit: str) -> str:
+    """Human amount string; whole numbers when close, else one decimal."""
+    unit = (unit or "g").strip()
+    if abs(value - round(value)) < 0.05:
+        qty_s = str(int(round(value)))
+        whole = int(round(value))
+    else:
+        qty_s = f"{value:.1f}".rstrip("0").rstrip(".")
+        whole = None
+    if unit in {"g", "gram", "grams"}:
+        return f"{qty_s} g"
+    unit_out = unit
+    if whole is not None and abs(whole) != 1:
+        # Light pluralization for common cooking units.
+        if unit.endswith(("spoon", "ounce", "cup", "clove", "slice", "piece")) and not unit.endswith("s"):
+            unit_out = unit + "s"
+        elif unit in {"tbsp", "tsp", "oz", "lb"}:
+            unit_out = unit
+    return f"{qty_s} {unit_out}"
+
+
+def scaled_portion_amount(
+    row: dict[str, Any],
+    *,
+    grams: float | None,
+) -> dict[str, Any]:
+    """Scale source quantity/unit by LP gram change; fall back to whole grams."""
+    orig_g = _as_float(row.get("original_grams"))
+    if orig_g is None:
+        orig_g = _as_float(row.get("gram_weight"))
+    qty = _as_float(row.get("quantity"))
+    unit = str(row.get("unit") or "").strip() or None
+    if (
+        grams is not None
+        and qty is not None
+        and unit
+        and unit.lower() not in {"g", "gram", "grams"}
+        and orig_g is not None
+        and orig_g > 1e-9
+    ):
+        scaled = float(qty) * (float(grams) / float(orig_g))
+        return {
+            "amount_value": scaled,
+            "amount_unit": unit,
+            "amount_display": _format_amount(scaled, unit),
+            "amount_source": "scaled_portion",
+        }
+    if grams is not None:
+        rounded = float(round(float(grams)))
+        return {
+            "amount_value": rounded,
+            "amount_unit": "g",
+            "amount_display": _format_amount(rounded, "g"),
+            "amount_source": "grams",
+        }
+    return {
+        "amount_value": None,
+        "amount_unit": None,
+        "amount_display": "—",
+        "amount_source": "missing",
+    }
+
+
 def build_ingredient_display_rows(
     *,
     ingredients: list[dict[str, Any]],
@@ -423,8 +600,18 @@ def build_ingredient_display_rows(
     fo_rows = list(foodon_report.get("ingredients") or [])
     basis_list = list(problem.get("ingredient_basis") or [])
     samples_map = problem.get("basis_samples") or {}
-    M = np.asarray(problem.get("M") or [], dtype=float)
-    x_opt = np.asarray(opt.get("x_opt") or problem.get("x_opt") or problem.get("x0") or [], dtype=float)
+    M_raw = problem.get("M") or []
+    try:
+        M = np.asarray(M_raw, dtype=float)
+        if M.ndim != 2:
+            M = np.zeros((0, 0), dtype=float)
+    except (TypeError, ValueError):
+        M = np.zeros((0, 0), dtype=float)
+    x_raw = opt.get("x_opt") or problem.get("x_opt") or problem.get("x0") or []
+    try:
+        x_opt = np.asarray(x_raw, dtype=float)
+    except (TypeError, ValueError):
+        x_opt = np.zeros(0, dtype=float)
     total_mass = float(problem.get("total_mass") or (float(x_opt.sum()) if x_opt.size else 0.0) or 0.0)
     tl = opt.get("term_losses") or {}
 
@@ -445,11 +632,18 @@ def build_ingredient_display_rows(
         grams = _as_float(row.get("grams") if row.get("grams") is not None else row.get("gram_weight"))
         if grams is None and i < x_opt.size:
             grams = float(x_opt[i])
-        basis = fo.get("basis_node_id") or (basis_list[i] if i < len(basis_list) else None)
+        portion = scaled_portion_amount(row, grams=grams)
+        basis = (
+            fo.get("basis_node_id")
+            or row.get("basis_node_id")
+            or (basis_list[i] if i < len(basis_list) else None)
+        )
         basis = str(basis) if basis else None
-        leaf = fo.get("foodon_leaf_id") or row.get("foodon_id")
+        leaf = fo.get("foodon_leaf_id") or row.get("foodon_id") or row.get("foodon_leaf_id")
         leaf = str(leaf) if leaf else None
         levels = fo.get("aggregation_levels")
+        if levels is None:
+            levels = row.get("aggregation_levels")
         if levels is not None:
             try:
                 levels = int(levels)
@@ -465,38 +659,64 @@ def build_ingredient_display_rows(
                 n_hits = len(samples)
             except Exception:
                 samples = None
-        # If optimizer skipped this node (not in marginal_nodes / empty samples),
-        # still compute an on-the-fly share MAD so the UI never blanks a mapped ingredient.
-        recipe_share = share_by_basis.get(basis) if basis else None
-        if recipe_share is None and grams is not None and total_mass > 0:
-            recipe_share = float(grams) / total_mass
+        # Line-item mass share (what the user is editing). Basis-aggregate share is
+        # still available via share_by_basis for loss terms.
+        line_share = None
+        if grams is not None and total_mass > 0:
+            line_share = float(grams) / total_mass
+        basis_share = share_by_basis.get(basis) if basis else None
+        recipe_share = line_share if line_share is not None else basis_share
         if loss_contrib is None and recipe_share is not None and samples:
             # Mean absolute deviation vs neighborhood shares (same as empirical CDF L1).
             arr = np.asarray(samples, dtype=float)
-            loss_contrib = float(np.mean(np.abs(arr - float(recipe_share))))
+            # Compare basis role when available; else the line share.
+            compare_share = basis_share if basis_share is not None else float(recipe_share)
+            loss_contrib = float(np.mean(np.abs(arr - float(compare_share))))
         elif loss_contrib is None and basis and str(basis) not in {"ood_lean_protein", "None"}:
             # Mapped but no neighborhood hits yet — mark unknown, not zero.
             loss_contrib = None
 
-        loss_band = band_for_loss(
-            loss_contrib,
-            good_max=SHARE_LOSS_BANDS["good_max"],
-            warn_max=SHARE_LOSS_BANDS["warn_max"],
-        )
-        if loss_contrib is None and n_hits < 5:
-            loss_band = "unknown"
-
         iqr = _iqr_stats(samples)
+        if iqr is None and isinstance(row.get("share_iqr"), dict):
+            # Recompute payloads may omit basis_samples; keep the UI IQR.
+            iqr = dict(row["share_iqr"])
+            n_hits = int(_as_float(iqr.get("n")) or n_hits or 0)
+        # Color by this line's share vs the basis neighborhood IQR.
+        loss_band = share_band_from_iqr(recipe_share, iqr)
 
         kcal = None
         if grams is not None and M.ndim == 2 and i < M.shape[1]:
             kcal = _calories_for_column(M, i, grams)
+        if kcal is None:
+            # Prefer density scaling when the client already had calories for a
+            # previous gram weight (common when M is omitted from the UI problem).
+            prev_cal = _as_float(row.get("calories"))
+            prev_g = _as_float(row.get("_prev_grams"))
+            if (
+                prev_cal is not None
+                and prev_g is not None
+                and prev_g > 1e-9
+                and grams is not None
+            ):
+                kcal = float(prev_cal) * (float(grams) / float(prev_g))
+            elif prev_cal is not None and grams is not None:
+                # Same grams snapshot — keep prior calories.
+                kcal = float(prev_cal)
 
         out.append(
             {
                 "index": i,
                 "label": label,
                 "grams": grams,
+                "grams_rounded": None if grams is None else int(round(float(grams))),
+                "amount_value": portion["amount_value"],
+                "amount_unit": portion["amount_unit"],
+                "amount_display": portion["amount_display"],
+                "amount_source": portion["amount_source"],
+                "quantity": row.get("quantity"),
+                "unit": row.get("unit"),
+                "original_grams": row.get("original_grams") or row.get("gram_weight"),
+                "source_text": row.get("source_text"),
                 "fdc_id": row.get("fdc_id"),
                 "foodon_leaf_id": leaf,
                 "foodon_leaf_label": fo.get("foodon_leaf_label") or leaf,
@@ -507,12 +727,12 @@ def build_ingredient_display_rows(
                 "loss_band": loss_band,
                 "loss_label": "ratio loss",
                 "basis_n_hits": n_hits,
-                "calories": kcal,
+                "calories": None if kcal is None else int(round(float(kcal))),
                 "recipe_share": recipe_share,
                 "share_iqr": iqr,
             }
         )
-    return out
+    return filter_display_ingredients(out)
 
 
 def _extract_holistic_0_10(payload: dict[str, Any]) -> tuple[float | None, str]:
@@ -582,21 +802,105 @@ def build_display_scores(payload: dict[str, Any] | None, *, ready: bool = True) 
         nutrient, good_max=NUTRIENT_LOSS_BANDS["good_max"], warn_max=NUTRIENT_LOSS_BANDS["warn_max"]
     )
 
+    pfc = ctx.get("pfc_after")
+    if not isinstance(pfc, dict):
+        pfc = (ctx.get("opt") or {}).get("pfc_after") if isinstance(ctx.get("opt"), dict) else None
+    protein = _as_float((pfc or {}).get("protein") if isinstance(pfc, dict) else None)
+    carb = _as_float(
+        (pfc or {}).get("carb") if isinstance(pfc, dict) else None
+    )
+    if carb is None and isinstance(pfc, dict):
+        carb = _as_float(pfc.get("carbs"))
+    fat = _as_float((pfc or {}).get("fat") if isinstance(pfc, dict) else None)
+    total_kcal = 0.0
+    kcal_n = 0
+    for row in ingredients:
+        kcal = _as_float(row.get("calories"))
+        if kcal is not None:
+            total_kcal += float(kcal)
+            kcal_n += 1
+    if kcal_n == 0:
+        # Fall back to Atwater from M · x when ingredient kcal rows are blank.
+        M_raw = (ctx.get("problem") or {}).get("M") or []
+        x_raw = (
+            (ctx.get("opt") or {}).get("x_opt")
+            or (ctx.get("problem") or {}).get("x_opt")
+            or (ctx.get("problem") or {}).get("x0")
+            or []
+        )
+        try:
+            M = np.asarray(M_raw, dtype=float)
+            x_opt = np.asarray(x_raw, dtype=float)
+        except (TypeError, ValueError):
+            M = np.zeros((0, 0), dtype=float)
+            x_opt = np.zeros(0, dtype=float)
+        if M.ndim == 2 and x_opt.size and M.shape[1] == x_opt.size:
+            for i in range(x_opt.size):
+                kcal = _calories_for_column(M, i, float(x_opt[i]))
+                if kcal is not None:
+                    total_kcal += float(kcal)
+                    kcal_n += 1
+    macros = {
+        "protein": None if protein is None else round(protein * 100),
+        "carb": None if carb is None else round(carb * 100),
+        "fat": None if fat is None else round(fat * 100),
+        "calories": None if kcal_n == 0 else int(round(total_kcal)),
+    }
+
+    from recipe_opt_agent.portion_display import (
+        annotate_ingredient_edits,
+        collect_applied_edits,
+        cookability_from_score_history,
+        mark_novel_ingredients,
+    )
+
+    applied_edits = collect_applied_edits(payload)
+    ingredients = annotate_ingredient_edits(ingredients, applied_edits)
+    original = (
+        payload.get("original_ingredients")
+        or ((payload.get("problem") or {}).get("starting_ingredients"))
+        or ((payload.get("problem") or {}).get("chosen_recipe") or {}).get("original_ingredients")
+        or []
+    )
+    # Prefer frozen init snapshot when present on the run payload.
+    if not original and isinstance(payload.get("chosen_recipe"), dict):
+        # no-op; keep empty
+        pass
+    ingredients = mark_novel_ingredients(
+        ingredients,
+        original_ingredients=list(original) if isinstance(original, list) else [],
+    )
+    cookability = cookability_from_score_history(
+        list(payload.get("score_history") or []),
+        final_ratio=ratio,
+    )
+
+    typicality = proportion_typicality_from_ingredients(ingredients)
+
     return {
         "ready": True,
         "iteration": payload.get("iteration"),
         "ratio_loss": {
             "value": ratio,
-            "band": ratio_band,
+            "band": typicality.get("band") or ratio_band,
             "label": "Ratio loss",
             "direction": "lower_better",
             "unit": "surrogate",
             "source": ratio_src,
             "explanation": (
-                "Mass-normalized deviation from neighborhood pasta∶egg ratio samples "
-                f"(good ≤ {RATIO_LOSS_BANDS['good_max']}, warn ≤ {RATIO_LOSS_BANDS['warn_max']}). "
-                "Blank if the chosen recipe has no ratio term."
+                "Typicality uses ingredients with a valid neighborhood IQR only. "
+                "A worse band requires BOTH the %-of-those-ingredients outside IQR and the "
+                "%-of-their-calories outside IQR to exceed the threshold "
+                "(<17% very typical; <25% mostly typical; <35% somewhat different; 35%+ substantially off)."
             ),
+            "band_summary": typicality.get("summary")
+            or RATIO_BAND_SUMMARY.get(ratio_band, RATIO_BAND_SUMMARY["unknown"]),
+            "proportion_key": typicality.get("key"),
+            "proportion_css": typicality.get("css"),
+            "outside_iqr_frac": typicality.get("outside_iqr_frac"),
+            "outside_iqr_pct": typicality.get("outside_iqr_pct"),
+            "outside_iqr_calorie_frac": typicality.get("outside_iqr_calorie_frac"),
+            "outside_iqr_calorie_pct": typicality.get("outside_iqr_calorie_pct"),
             "thresholds": dict(RATIO_LOSS_BANDS),
         },
         "nutrient_loss": {
@@ -610,6 +914,7 @@ def build_display_scores(payload: dict[str, Any] | None, *, ready: bool = True) 
                 "L1 calorie-fraction distance outside the protein/carb/fat box "
                 "(0 = inside the box). Recomputed from the chosen recipe PFC."
             ),
+            "band_summary": NUTRIENT_BAND_SUMMARY.get(nutrient_band, NUTRIENT_BAND_SUMMARY["unknown"]),
             "thresholds": dict(NUTRIENT_LOSS_BANDS),
         },
         "holistic_0_10": {
@@ -621,6 +926,14 @@ def build_display_scores(payload: dict[str, Any] | None, *, ready: bool = True) 
             "source": holistic_source,
             "explanation": "LLM judge 0–10 when available; otherwise intent/composite × 10.",
         },
+        "macros": macros,
+        "pfc_after": (
+            {"protein": protein, "carb": carb, "fat": fat}
+            if protein is not None or carb is not None or fat is not None
+            else None
+        ),
+        "cookability": cookability,
+        "applied_edits": applied_edits,
         "ingredients": ingredients,
         "score_history": list(payload.get("score_history") or []),
         "L_max_norm": _as_float((payload.get("diagnosis") or {}).get("L_max_norm"))
@@ -919,3 +1232,735 @@ def select_path_finalists(
         best = min(pool, key=lambda c: _candidate_rank_key(c, ood_handicap=ood_handicap))
         out[fam] = _candidate_to_final_payload(best, state, path_key=fam)
     return out
+
+
+def extract_judge_rationale(payload: dict[str, Any] | None) -> str | None:
+    """Best-available LLM/heuristic rationale comparing final candidates."""
+    payload = payload or {}
+    for path in (
+        (payload.get("judge_result") or {}).get("rationale"),
+        (payload.get("final_judgment") or {}).get("rationale"),
+        ((payload.get("chosen") or {}).get("arbiter_rationale")),
+        ((payload.get("chosen") or {}).get("judge") or {}).get("rationale"),
+    ):
+        text = str(path or "").strip()
+        if text and text.lower() not in {"none", "null"}:
+            return text
+    return None
+
+
+def _polish_candidate_display(
+    *,
+    display_scores: dict[str, Any],
+    problem: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """USDA enrich + consolidate duplicates; optionally remap problem columns."""
+    from recipe_opt_agent.portion_display import (
+        consolidate_duplicate_ingredients,
+        enrich_ingredients_with_usda_portions,
+    )
+
+    display = dict(display_scores or {})
+    ings = list(display.get("ingredients") or [])
+    try:
+        ings = enrich_ingredients_with_usda_portions(ings)
+    except Exception:
+        pass
+    merged, problem_update = consolidate_duplicate_ingredients(
+        ings,
+        problem=problem if isinstance(problem, dict) else None,
+    )
+    display["ingredients"] = filter_display_ingredients(merged)
+    return display, problem_update
+
+
+def prepare_browse_candidates(
+    final_payload: dict[str, Any],
+    state: dict[str, Any] | None = None,
+    *,
+    max_candidates: int = 4,
+) -> list[dict[str, Any]]:
+    """Build ≤N MacroIQ-browsable candidates ranked best→worst.
+
+    Primary order is proportion quality. LLM-flagged weird recipes are demoted
+    to the end (still ordered among themselves by proportion).
+    """
+    state = state or {}
+    max_n = max(1, int(max_candidates))
+    recommended_id = None
+    chosen = final_payload.get("chosen") or {}
+    if isinstance(chosen.get("entry"), dict):
+        recommended_id = chosen["entry"].get("candidate_id") or chosen.get("arbiter_winner_id")
+    recommended_id = (
+        recommended_id
+        or chosen.get("candidate_id")
+        or (final_payload.get("judge_result") or {}).get("winner_id")
+        or (final_payload.get("final_judgment") or {}).get("winner_id")
+        or "recommended"
+    )
+
+    weird_by_id: dict[str, dict[str, Any]] = {}
+    raw_weird = final_payload.get("weird_flags") or {}
+    if isinstance(raw_weird, dict):
+        weird_by_id = {
+            str(k): v for k, v in raw_weird.items() if isinstance(v, dict) and v.get("is_weird")
+        }
+    for cid in final_payload.get("weird_candidate_ids") or []:
+        weird_by_id.setdefault(str(cid), {"is_weird": True, "odd_ingredients": [], "note": ""})
+
+    cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    from recipe_opt_agent.kcal_utils import resolve_user_kcal_target, scale_candidate_to_kcal
+
+    kcal_target = resolve_user_kcal_target(
+        final_payload.get("config"),
+        state.get("config"),
+        final_payload.get("problem"),
+        state.get("problem"),
+    )
+
+    def _push(
+        *,
+        candidate_id: str,
+        title: str,
+        branch: str | None,
+        display: dict[str, Any],
+        problem: dict[str, Any] | None,
+        macro_targets: dict[str, Any] | None,
+        is_recommended: bool,
+        edits: list[dict[str, Any]] | None = None,
+        source: str | None = None,
+    ) -> None:
+        cid = str(candidate_id or title)
+        if cid in seen:
+            return
+        seen.add(cid)
+        problem_scaled, display_scaled = scale_candidate_to_kcal(
+            problem=problem if isinstance(problem, dict) else {},
+            display=display or {},
+            kcal_target=kcal_target,
+        )
+        scores = display_scaled or {}
+        problem_out = problem_scaled or problem or {}
+        macros = scores.get("macros") or {}
+        iqr_frac, iqr_in, iqr_known = _iqr_in_band_fraction(scores)
+        ratio_val = (scores.get("ratio_loss") or {}).get("value")
+        outside_cal = (scores.get("ratio_loss") or {}).get("outside_iqr_calorie_frac")
+        if outside_cal is None:
+            try:
+                outside_cal = _iqr_alignment_stats(list(scores.get("ingredients") or [])).get(
+                    "outside_iqr_calorie_frac"
+                )
+            except Exception:
+                outside_cal = None
+        weird_meta = weird_by_id.get(cid) or {}
+        cards.append(
+            {
+                "candidate_id": cid,
+                "title": title,
+                "branch": branch or "in_distribution",
+                "is_recommended": bool(is_recommended),
+                "source": source,
+                "display_scores": scores,
+                "problem": problem_out,
+                "macro_targets": macro_targets or final_payload.get("macro_targets") or {},
+                "edits": list(edits or scores.get("applied_edits") or []),
+                "is_weird": bool(weird_meta.get("is_weird")),
+                "weird_note": weird_meta.get("note") or "",
+                "odd_ingredients": list(weird_meta.get("odd_ingredients") or []),
+                "score_summary": {
+                    "macros": macros,
+                    "ratio_loss": ratio_val,
+                    "ratio_band": (scores.get("ratio_loss") or {}).get("band"),
+                    "nutrient_loss": (scores.get("nutrient_loss") or {}).get("value"),
+                    "nutrient_band": (scores.get("nutrient_loss") or {}).get("band"),
+                    "cookability": (scores.get("cookability") or {}).get("summary"),
+                    "holistic_0_10": (scores.get("holistic_0_10") or {}).get("value"),
+                    "iqr_in_band_frac": iqr_frac,
+                    "iqr_in_band_count": iqr_in,
+                    "iqr_known_count": iqr_known,
+                    "outside_iqr_calorie_frac": outside_cal,
+                    "calories": macros.get("calories"),
+                    "is_weird": bool(weird_meta.get("is_weird")),
+                },
+            }
+        )
+
+    # 1) Current enriched final (arbiter/judge pick) — may not stay first after sort
+    rec_display = dict(final_payload.get("display_scores") or {})
+    rec_problem = (
+        final_payload.get("problem")
+        if isinstance(final_payload.get("problem"), dict)
+        else state.get("problem")
+    )
+    _push(
+        candidate_id=str(recommended_id),
+        title="Recommended",
+        branch=(chosen.get("branch") or (chosen.get("entry") or {}).get("branch")),
+        display=rec_display,
+        problem=rec_problem,
+        macro_targets=final_payload.get("macro_targets"),
+        is_recommended=True,
+        edits=rec_display.get("applied_edits"),
+        source=chosen.get("source") or "recommended",
+    )
+
+    # 2) Creative scored finalists / alternatives
+    for raw in list(final_payload.get("scored_finalists") or []) + list(
+        final_payload.get("alternatives") or []
+    ):
+        if not isinstance(raw, dict):
+            continue
+        entry = raw.get("entry") if isinstance(raw.get("entry"), dict) else raw
+        if isinstance(entry.get("metrics"), dict):
+            nested = (entry.get("metrics") or {}).get("raw", {}).get("entry")
+            if isinstance(nested, dict):
+                entry = {**nested, "candidate_id": raw.get("candidate_id") or nested.get("candidate_id")}
+        cid = str(raw.get("candidate_id") or entry.get("candidate_id") or "")
+        if not cid or cid in seen:
+            continue
+        mini = _candidate_to_final_payload(
+            {**entry, "candidate_id": cid},
+            {**state, "config": final_payload.get("config") or state.get("config") or {}},
+            path_key=branch_path_family(entry.get("branch")) or "in_distribution",
+        )
+        display, problem_update = _polish_candidate_display(
+            display_scores=mini.get("display_scores") or {},
+            problem=mini.get("problem"),
+        )
+        problem = problem_update or mini.get("problem")
+        _push(
+            candidate_id=cid,
+            title="Alternative",
+            branch=entry.get("branch"),
+            display=display,
+            problem=problem,
+            macro_targets=mini.get("macro_targets"),
+            is_recommended=False,
+            edits=entry.get("edits") or display.get("applied_edits"),
+            source="scored_finalist",
+        )
+
+    # 3) Path finals (ID / OOD champions)
+    for fam, payload in (final_payload.get("path_finals") or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        cid = f"path_{fam}"
+        if cid in seen:
+            continue
+        display = dict(payload.get("display_scores") or {})
+        problem = payload.get("problem") if isinstance(payload.get("problem"), dict) else None
+        display, problem_update = _polish_candidate_display(display_scores=display, problem=problem)
+        problem = problem_update or problem
+        _push(
+            candidate_id=cid,
+            title="In-distribution" if fam == "in_distribution" else "Out-of-distribution",
+            branch=fam,
+            display=display,
+            problem=problem,
+            macro_targets=payload.get("macro_targets"),
+            is_recommended=False,
+            edits=(payload.get("chosen") or {}).get("edits") or display.get("applied_edits"),
+            source="path_final",
+        )
+
+    # 4) Arbiter / pool leftovers
+    for raw in list(state.get("candidate_pool") or []) + list(
+        final_payload.get("interesting_candidates") or []
+    ):
+        if not isinstance(raw, dict):
+            continue
+        cid = str(raw.get("candidate_id") or "")
+        if not cid or cid in seen:
+            continue
+        if not _candidate_has_recipe_signal(raw):
+            continue
+        mini = _candidate_to_final_payload(
+            raw,
+            {**state, "config": final_payload.get("config") or state.get("config") or {}},
+            path_key=branch_path_family(raw.get("branch")) or "in_distribution",
+        )
+        display, problem_update = _polish_candidate_display(
+            display_scores=mini.get("display_scores") or {},
+            problem=mini.get("problem"),
+        )
+        _push(
+            candidate_id=cid,
+            title="Alternative",
+            branch=raw.get("branch"),
+            display=display,
+            problem=problem_update or mini.get("problem"),
+            macro_targets=mini.get("macro_targets"),
+            is_recommended=False,
+            edits=raw.get("edits") or display.get("applied_edits"),
+            source="pool",
+        )
+
+    cards.sort(key=lambda c: _browse_rank_key(c, kcal_target=kcal_target))
+    cards = cards[:max_n]
+
+    # Best proportion quality first (weird demoted); relabel Recommended + Option N
+    for i, card in enumerate(cards):
+        card["is_recommended"] = i == 0
+        card["proportion_rank"] = i + 1
+        branch = str(card.get("branch") or "")
+        suffix = ""
+        if card.get("is_weird"):
+            suffix = " · unusual ingredients"
+        elif branch.startswith("ood"):
+            suffix = " · stretch"
+        elif branch == "hybrid":
+            suffix = " · hybrid"
+        if i == 0:
+            card["title"] = "Recommended"
+        else:
+            card["title"] = f"Option {i + 1}{suffix}"
+    return cards
+
+
+def _iqr_in_band_fraction(display: dict[str, Any] | None) -> tuple[float, int, int]:
+    """Fraction of ingredients whose recipe share falls in the neighborhood IQR."""
+    ings = list((display or {}).get("ingredients") or [])
+    stats = _iqr_alignment_stats(ings)
+    return float(stats["in_iqr_frac"]), int(stats["in_iqr_count"]), int(stats["known_count"])
+
+
+def _iqr_width_usable(q1: float, q3: float) -> bool:
+    """False for zero-width / degenerate central bands (do not score or color)."""
+    lo, hi = (q1, q3) if q1 <= q3 else (q3, q1)
+    width = float(hi) - float(lo)
+    if width <= 1e-12:
+        return False
+    # Near-zero relative width (collapsed P15≈P85) is also unusable.
+    scale = max(abs(float(lo)), abs(float(hi)), 1e-9)
+    if width / scale <= 1e-6:
+        return False
+    return True
+
+
+def _ingredient_has_valid_iqr(row: dict[str, Any] | None) -> bool:
+    """True when neighborhood IQR stats are usable for typicality scoring.
+
+    Sparse (n < 5) and degenerate (zero / near-zero width) bands are excluded so
+    they neither penalize proportion typicality nor drive UI outside-band tones.
+    """
+    if not isinstance(row, dict):
+        return False
+    iqr = row.get("share_iqr") if isinstance(row.get("share_iqr"), dict) else None
+    if not iqr:
+        return False
+    q1 = _as_float(iqr.get("q1"))
+    q3 = _as_float(iqr.get("q3"))
+    if q1 is None or q3 is None:
+        return False
+    n = _as_float(iqr.get("n"))
+    if n is not None and n < 5:
+        return False
+    if not _iqr_width_usable(float(q1), float(q3)):
+        return False
+    return True
+
+
+def _is_zero_portion(row: dict[str, Any] | None) -> bool:
+    """True when the line has no meaningful mass / kitchen amount.
+
+    Explicit 0 grams/amount counts as zero. Missing amount fields still count as
+    non-zero when calories are present (common in typicality unit tests / rollups).
+    """
+    if not isinstance(row, dict):
+        return True
+    grams = _as_float(row.get("grams"))
+    if grams is not None:
+        return abs(float(grams)) <= 1e-9
+    amount = _as_float(row.get("amount_value"))
+    if amount is not None:
+        return abs(float(amount)) <= 1e-9
+    cal = _as_float(row.get("calories"))
+    if cal is not None and float(cal) > 0:
+        return False
+    return True
+
+
+def _has_distribution_data(row: dict[str, Any] | None) -> bool:
+    """Neighborhood share distribution usable for coloring / typicality."""
+    return _ingredient_has_valid_iqr(row)
+
+
+def should_include_display_ingredient(row: dict[str, Any] | None) -> bool:
+    """Drop zero-amount lines that also lack neighborhood distribution data.
+
+    Grey (unknown) rows with real mass stay visible; empty phantom spices with no
+    IQR do not.
+    """
+    if not isinstance(row, dict):
+        return False
+    label = str(row.get("label") or row.get("name") or "").strip()
+    if not label:
+        return False
+    if _is_zero_portion(row) and not _has_distribution_data(row):
+        return False
+    return True
+
+
+def filter_display_ingredients(ingredients: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Omit zero-portion + no-distribution ingredients from MacroIQ lists."""
+    return [dict(r) for r in (ingredients or []) if should_include_display_ingredient(r)]
+
+
+def _row_weight_kcal(row: dict[str, Any]) -> float | None:
+    """Calorie (or mass) weight for typicality; None if the row should be skipped."""
+    if _is_zero_portion(row):
+        return None
+    cal = _as_float(row.get("calories"))
+    if cal is not None and cal > 0:
+        return float(cal)
+    grams = _as_float(row.get("grams"))
+    if grams is not None and grams > 0:
+        return float(grams)
+    return None
+
+
+def _iqr_counts_from_ingredients(ingredients: list[dict[str, Any]] | None) -> tuple[float, int, int]:
+    """Return (in_band_frac, in_band_count, known_count) for ingredients with valid IQR."""
+    stats = _iqr_alignment_stats(ingredients)
+    return float(stats["in_iqr_frac"]), int(stats["in_iqr_count"]), int(stats["known_count"])
+
+
+def _iqr_alignment_stats(ingredients: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Calorie-weighted IQR alignment, deduped by FoodOn basis node.
+
+    Neighborhood IQRs are basis-level. Counting every line item separately (or
+    equal-weighting spices) makes a 2 kcal ginger tweak look like a recipe-wide
+    proportion failure. We group by ``basis_node_id``, sum calories, and compare
+    the group's mass share to that basis IQR once.
+
+    Zero-portion rows and rows without usable distribution data are ignored.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    for idx, row in enumerate(ingredients or []):
+        if _is_zero_portion(row):
+            continue
+        if not _ingredient_has_valid_iqr(row):
+            continue
+        share = _as_float(row.get("recipe_share"))
+        if share is None:
+            continue
+        iqr = row.get("share_iqr") or {}
+        q1 = _as_float(iqr.get("q1"))
+        q3 = _as_float(iqr.get("q3"))
+        if q1 is None or q3 is None:
+            continue
+        weight = _row_weight_kcal(row)
+        if weight is None:
+            continue
+        basis = row.get("basis_node_id") or row.get("basis_node_label")
+        key = str(basis) if basis else f"__row_{idx}"
+        g = groups.get(key)
+        if g is None:
+            groups[key] = {
+                "shares": [],
+                "weight": 0.0,
+                "q1": float(q1),
+                "q3": float(q3),
+            }
+            g = groups[key]
+        g["shares"].append(float(share))
+        g["weight"] = float(g["weight"]) + float(weight)
+
+    known = 0
+    in_band = 0
+    cal_known = 0.0
+    cal_outside = 0.0
+    for g in groups.values():
+        shares = list(g["shares"])
+        if not shares:
+            continue
+        # Rows that already store the aggregate basis share are identical; take
+        # one. Otherwise sum line-item shares for the basis group.
+        if len(shares) > 1 and max(shares) - min(shares) <= 1e-9:
+            share = shares[0]
+        else:
+            share = float(sum(shares))
+        q1 = float(g["q1"])
+        q3 = float(g["q3"])
+        lo, hi = (q1, q3) if q1 <= q3 else (q3, q1)
+        outside = not (lo <= share <= hi)
+        known += 1
+        if not outside:
+            in_band += 1
+        w = float(g["weight"])
+        cal_known += w
+        if outside:
+            cal_outside += w
+
+    in_frac = (in_band / known) if known else 0.0
+    outside_count = known - in_band
+    outside_count_frac = (outside_count / known) if known else 0.0
+    outside_cal_frac = (cal_outside / cal_known) if cal_known > 1e-9 else 0.0
+    return {
+        "in_iqr_frac": float(in_frac),
+        "in_iqr_count": int(in_band),
+        "known_count": int(known),
+        "outside_count": int(outside_count),
+        "outside_iqr_frac": float(outside_count_frac),
+        "outside_iqr_calorie_frac": float(outside_cal_frac),
+        "outside_iqr_calories": float(cal_outside),
+        "known_iqr_calories": float(cal_known),
+    }
+
+
+def proportion_typicality_from_ingredients(
+    ingredients: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Map central-band misalignment → MacroIQ proportion copy.
+
+    Severity is the **calorie fraction** of basis groups whose share sits outside
+    the neighborhood P15–P85 band. Sparse neighbor lines (n < 5) and zero-portion
+    rows are ignored — they do not count against the proportion fit band.
+    """
+    stats = _iqr_alignment_stats(ingredients)
+    known = int(stats["known_count"])
+    if known <= 0 or float(stats.get("known_iqr_calories") or 0) <= 1e-9:
+        meta = PROPORTION_TYPICALITY["unknown"]
+        return {
+            "key": "unknown",
+            "summary": meta["summary"],
+            "band": meta["band"],
+            "css": meta["css"],
+            "outside_iqr_frac": None,
+            "outside_iqr_pct": None,
+            "outside_iqr_calorie_frac": None,
+            "outside_iqr_calorie_pct": None,
+            "in_iqr_count": 0,
+            "known_count": 0,
+        }
+    count_pct = 100.0 * float(stats["outside_iqr_frac"])
+    cal_pct = 100.0 * float(stats["outside_iqr_calorie_frac"])
+    severity_pct = cal_pct
+    # Sparse / unknown-distribution lines are already excluded from ``stats``.
+    if severity_pct < 17.0:
+        key = "very_typical"
+    elif severity_pct < 25.0:
+        key = "mostly_typical"
+    elif severity_pct < 35.0:
+        key = "somewhat_different"
+    else:
+        key = "substantially_off"
+    meta = PROPORTION_TYPICALITY[key]
+    return {
+        "key": key,
+        "summary": meta["summary"],
+        "band": meta["band"],
+        "css": meta["css"],
+        "outside_iqr_frac": float(stats["outside_iqr_frac"]),
+        "outside_iqr_pct": int(round(count_pct)),
+        "outside_iqr_calorie_frac": float(stats["outside_iqr_calorie_frac"]),
+        "outside_iqr_calorie_pct": int(round(cal_pct)),
+        "severity_pct": float(severity_pct),
+        "in_iqr_count": int(stats["in_iqr_count"]),
+        "known_count": known,
+    }
+
+
+def _browse_rank_key(
+    card: dict[str, Any],
+    *,
+    kcal_target: float | None = None,
+) -> tuple:
+    """Lower is better: weird demotion, then proportion quality, ratio, kcal.
+
+    Proportion quality = calorie-weighted fraction of basis groups outside the
+    neighborhood IQR (same metric as MacroIQ's proportion verdict). LLM flags
+    only push obviously-bad recipes after all normal ones.
+    """
+    summary = card.get("score_summary") or {}
+    scores = card.get("display_scores") or {}
+    weird_pen = 1 if (card.get("is_weird") or summary.get("is_weird")) else 0
+
+    outside_cal = _as_float(summary.get("outside_iqr_calorie_frac"))
+    if outside_cal is None:
+        outside_cal = _as_float((scores.get("ratio_loss") or {}).get("outside_iqr_calorie_frac"))
+    if outside_cal is None:
+        # Derive from ingredients when polish hasn't stamped the field yet.
+        ings = list(scores.get("ingredients") or [])
+        if ings:
+            try:
+                outside_cal = float(_iqr_alignment_stats(ings).get("outside_iqr_calorie_frac") or 0.0)
+            except Exception:
+                outside_cal = None
+    if outside_cal is None:
+        # Unknown IQR → fall back to 1 − in-band count fraction.
+        iqr_frac = _as_float(summary.get("iqr_in_band_frac"))
+        if iqr_frac is None:
+            iqr_frac, _, known = _iqr_in_band_fraction(scores)
+            if known <= 0:
+                outside_cal = 1.0
+            else:
+                outside_cal = 1.0 - float(iqr_frac)
+        else:
+            outside_cal = 1.0 - float(iqr_frac)
+
+    ratio = _as_float(summary.get("ratio_loss"))
+    if ratio is None:
+        ratio = _as_float((scores.get("ratio_loss") or {}).get("value"))
+    if ratio is None:
+        ratio = 99.0
+
+    kcal_pen = 0.0
+    if kcal_target is not None and float(kcal_target) > 0:
+        macros = summary.get("macros") or scores.get("macros") or {}
+        cal = _as_float(macros.get("calories") if isinstance(macros, dict) else None)
+        if cal is not None and cal > 0:
+            kcal_pen = abs(float(cal) - float(kcal_target)) / float(kcal_target)
+        else:
+            kcal_pen = 2.0
+    return (int(weird_pen), float(outside_cal), float(ratio), float(kcal_pen))
+
+
+def recompute_recipe_at_grams(
+    *,
+    problem: dict[str, Any],
+    ingredients: list[dict[str, Any]],
+    grams: list[float],
+    macro_targets: dict[str, Any] | None = None,
+    score_history: list[dict[str, Any]] | None = None,
+    baseline_ratio: float | None = None,
+) -> dict[str, Any]:
+    """Recompute macros, share bands, and cookability after a user gram edit."""
+    from recipe_opt_agent.portion_display import (
+        _format_qty,
+        cookability_from_score_history,
+    )
+    from weighted_empirical_opt import pfc_fractions_from_portions
+
+    problem = dict(problem or {})
+    ings = [dict(r) for r in (ingredients or [])]
+    n = min(len(ings), len(grams))
+    x = np.asarray([float(grams[i]) for i in range(n)], dtype=float)
+    for i in range(n):
+        prev_g = _as_float(ings[i].get("grams"))
+        if prev_g is not None:
+            ings[i]["_prev_grams"] = float(prev_g)
+        ings[i]["grams"] = float(x[i])
+
+    M_raw = problem.get("M") or []
+    try:
+        M = np.asarray(M_raw, dtype=float)
+    except (TypeError, ValueError):
+        M = np.zeros((0, 0), dtype=float)
+
+    pfc = None
+    if M.ndim == 2 and M.shape[1] >= n and x.size == n and n > 0:
+        try:
+            p, c, f = pfc_fractions_from_portions(x, M[:, :n])
+            pfc = {"protein": float(p), "carb": float(c), "fat": float(f)}
+        except Exception:
+            pfc = None
+
+    opt = {"x_opt": x.tolist(), "pfc_after": pfc, "term_losses": {}}
+    problem_local = {
+        **problem,
+        "x_opt": x.tolist(),
+        "total_mass": float(x.sum()) if x.size else problem.get("total_mass"),
+        "chosen_recipe": {
+            **(problem.get("chosen_recipe") or {}),
+            "ingredients": ings,
+        },
+    }
+    display_rows = build_ingredient_display_rows(
+        ingredients=ings,
+        problem=problem_local,
+        opt=opt,
+        foodon_report=problem.get("foodon_basis_report"),
+    )
+
+    for i, row in enumerate(display_rows):
+        src = ings[i] if i < len(ings) else {}
+        portion = scaled_portion_amount(src, grams=row.get("grams"))
+        if portion.get("amount_source") == "scaled_portion":
+            row.update(portion)
+            continue
+        gw = _as_float(src.get("portion_gram_weight"))
+        unit = src.get("amount_unit") or src.get("unit")
+        if gw and gw > 0 and unit and row.get("grams") is not None:
+            qty = float(row["grams"]) / float(gw)
+            row["amount_value"] = qty
+            row["amount_unit"] = unit
+            row["amount_display"] = _format_qty(qty, str(unit))
+            row["amount_source"] = src.get("amount_source") or "usda_scaled"
+            row["portion_gram_weight"] = gw
+
+    # Keep a stable 1:1 ingredient list for interactive edits (no merge/split).
+    total_kcal = 0.0
+    kcal_n = 0
+    for row in display_rows:
+        if row.get("calories") is not None:
+            total_kcal += float(row["calories"])
+            kcal_n += 1
+
+    nutrient = _pfc_box_slack(pfc, macro_targets or {})
+    nutrient_band = band_for_loss(
+        nutrient, good_max=NUTRIENT_LOSS_BANDS["good_max"], warn_max=NUTRIENT_LOSS_BANDS["warn_max"]
+    )
+
+    basis = list(problem.get("ingredient_basis") or [])
+    samples = problem.get("basis_samples") or {}
+    ratio = mean_abs_dev_from_median_shares(
+        x=x.tolist(),
+        ingredient_basis=basis,
+        basis_samples=samples if isinstance(samples, dict) else {},
+    )
+    ratio_band = band_for_loss(
+        ratio, good_max=RATIO_LOSS_BANDS["good_max"], warn_max=RATIO_LOSS_BANDS["warn_max"]
+    )
+    cookability = cookability_from_score_history(
+        list(score_history or []),
+        final_ratio=ratio,
+    )
+    if not cookability.get("improved") and baseline_ratio is not None and ratio is not None:
+        try:
+            base = float(baseline_ratio)
+            if base > 1e-12 and ratio < base - 1e-12:
+                pct_i = int(round((base - ratio) / base * 100.0))
+                if pct_i >= 1:
+                    cookability = {
+                        "improved": True,
+                        "improved_pct": pct_i,
+                        "summary": f"Improved cookability by {pct_i}%",
+                        "first_ratio_loss": base,
+                        "final_ratio_loss": ratio,
+                    }
+        except (TypeError, ValueError):
+            pass
+
+    typicality = proportion_typicality_from_ingredients(display_rows)
+    display_rows = filter_display_ingredients(display_rows)
+
+    return {
+        "macros": {
+            "protein": None if not pfc else round(float(pfc["protein"]) * 100),
+            "carb": None if not pfc else round(float(pfc["carb"]) * 100),
+            "fat": None if not pfc else round(float(pfc["fat"]) * 100),
+            "calories": None if kcal_n == 0 else int(round(total_kcal)),
+        },
+        "pfc_after": pfc,
+        "ratio_loss": {
+            "value": ratio,
+            "band": typicality.get("band") or ratio_band,
+            "band_summary": typicality.get("summary")
+            or RATIO_BAND_SUMMARY.get(ratio_band, RATIO_BAND_SUMMARY["unknown"]),
+            "proportion_key": typicality.get("key"),
+            "proportion_css": typicality.get("css"),
+            "outside_iqr_frac": typicality.get("outside_iqr_frac"),
+            "outside_iqr_pct": typicality.get("outside_iqr_pct"),
+            "outside_iqr_calorie_frac": typicality.get("outside_iqr_calorie_frac"),
+            "outside_iqr_calorie_pct": typicality.get("outside_iqr_calorie_pct"),
+        },
+        "nutrient_loss": {
+            "value": nutrient,
+            "band": nutrient_band,
+            "band_summary": NUTRIENT_BAND_SUMMARY.get(nutrient_band, NUTRIENT_BAND_SUMMARY["unknown"]),
+        },
+        "cookability": cookability,
+        "ingredients": display_rows,
+    }

@@ -236,12 +236,14 @@ def _proxy_score(bundle: list[dict[str, Any]]) -> float:
 
 def _lp_eval(problem: dict[str, Any], box_dict: dict[str, float]) -> dict[str, Any] | None:
     """Joint LP on a problem dict; returns objective + decomposition or None."""
+    from recipe_opt_agent.kcal_utils import restore_kcal_target
     from weighted_empirical_opt import (
         optimize_weighted_empirical_obj,
         pfc_fractions_from_portions,
         term_losses,
     )
 
+    problem = restore_kcal_target(problem)
     x0 = np.asarray(problem.get("x0") or [], dtype=float)
     M = np.asarray(problem.get("M") or [], dtype=float)
     if x0.size == 0 or M.ndim != 2 or M.shape[1] != x0.size:
@@ -345,6 +347,8 @@ def score_bundles(
                     "action": c.get("action"),
                     "candidate_id": c.get("candidate_id"),
                     "label": c.get("label"),
+                    "replace_label": c.get("replace_label")
+                    or (c.get("meta") or {}).get("swap_out_label"),
                     "slot_id": (c.get("meta") or {}).get("slot_id"),
                 }
                 for c in bundle

@@ -1670,6 +1670,7 @@ class CanonicalNeighborhood:
         fast: bool = False,
         use_cache: bool = True,
         save_cache: bool = False,
+        require_cache: bool = False,
     ) -> CanonicalNeighborhood:
         """Build neighborhood for a canonical dish.
 
@@ -1680,11 +1681,20 @@ class CanonicalNeighborhood:
         uses the cut antichain instead.
 
         ``save_cache=True``: upsert cache after a fresh build (used by precompute).
+
+        ``require_cache=True``: if the Jaccard cache row is missing/invalid, raise instead
+        of falling back to a live build (used by MacroIQ / web so demos stay on cache).
         """
         if use_cache:
             cached_nb = cls.from_cache(canonical_recipe_id)
             if cached_nb is not None:
                 return cached_nb
+            if require_cache:
+                raise ValueError(
+                    f"Neighborhood cache miss for canonical_recipe_id={canonical_recipe_id}. "
+                    "Precompute recipe.canonical_neighborhood_cache before running MacroIQ "
+                    "(scripts/populate_neighborhood_cache.py / precompute_canonical_neighborhoods.py)."
+                )
 
         nb = cls._build_fresh(canonical_recipe_id, fast=fast)
         if save_cache:

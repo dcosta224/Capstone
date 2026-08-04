@@ -10,6 +10,7 @@ const NODE_LAYOUT = {
   deduce_tags: { x: 40, y: 130 },
   llm_draft: { x: 40, y: 224 },
   ground_recipe: { x: 40, y: 318 },
+  shadow_gpt_candidate: { x: 140, y: 36 },
   diagnose: { x: 250, y: 36 },
   save_candidate: { x: 500, y: 36 },
   save_moderate: { x: 500, y: 36 },
@@ -27,6 +28,7 @@ const NODE_LABELS = {
   deduce_tags: "deduce_tags",
   llm_draft: "llm_draft",
   ground_recipe: "ground",
+  shadow_gpt_candidate: "extra draft",
   diagnose: "diagnose (+opt)",
   save_candidate: "save_candidate",
   save_moderate: "save_candidate",
@@ -107,6 +109,12 @@ const FALLBACK_DOCS = {
     summary: "Resolve draft lines to FDC foods.",
     detail: "Deterministic grounding.",
     compute: "deterministic",
+  },
+  shadow_gpt_candidate: {
+    title: "Extra draft candidate",
+    summary: "Quietly parks one additional optimized draft for comparison.",
+    detail: "Does not replace the working recipe.",
+    compute: "llm_content",
   },
   build_finalists: {
     title: "Build finalists",
@@ -427,6 +435,7 @@ let macroPresetBusy = false;
 
 const macroPresetStatus = document.getElementById("macro-preset-status");
 const macroPresetBtns = {
+  neighborhood_coverage: document.getElementById("macro-preset-neighborhood-coverage"),
   neighborhood_mean: document.getElementById("macro-preset-neighborhood-mean"),
 };
 

@@ -113,7 +113,12 @@ def _user_request(title: str, box: dict[str, float]) -> str:
     )
 
 
-def _build_example(canonical_id: int, title: str, target_mid: dict[str, float]) -> dict[str, Any] | None:
+def _build_example(
+    canonical_id: int,
+    title: str,
+    target_mid: dict[str, float],
+    target_box: dict[str, float] | None = None,
+) -> dict[str, Any] | None:
     from canonical_optimization import CanonicalNeighborhood
     from recipe_opt_agent.example_recipe import pick_example_recipe_near_targets
 
@@ -123,6 +128,7 @@ def _build_example(canonical_id: int, title: str, target_mid: dict[str, float]) 
         recipe_ids=list(nb.recipe_ids),
         query=title,
         target_mid=target_mid,
+        target_box=target_box,
     )
 
 
@@ -167,7 +173,7 @@ def _prepare_case(
         **kwargs,
     )
     if mode == "creative_example":
-        example = _build_example(canonical_id, title, target_mid)
+        example = _build_example(canonical_id, title, target_mid, target_box=box)
         problem = attach_example_recipe_to_problem(problem, example)
     return problem, "creative", req
 

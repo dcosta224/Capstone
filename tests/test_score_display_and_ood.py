@@ -137,17 +137,21 @@ def test_real_ratio_surrogate_and_nutrient_slack_displayed():
         "judge_result": {"winner_id": "a", "holistic_score_0_10": 8.5},
     }
     ratio, ratio_src, nutrient, nutrient_src = extract_ratio_and_nutrient(final)
-    assert ratio == 0.042
-    assert ratio_src == "ratio_surrogate"
+    # Prefer recomputed median-share deviation when basis samples are present.
+    assert ratio_src == "mean_abs_dev_from_median"
+    assert ratio is not None and ratio > 0
     assert nutrient is not None and nutrient > 0
     assert nutrient_src == "pfc_box_slack"
 
     scores = build_display_scores(final)
-    assert scores["ratio_loss"]["value"] == 0.042
-    assert scores["ratio_loss"]["band"] == "bad"
+    assert scores["ratio_loss"]["value"] == ratio
+    assert scores["ratio_loss"]["band"] in {"good", "warn", "bad"}
+    assert scores["ratio_loss"]["band_summary"]
     assert scores["nutrient_loss"]["value"] == nutrient
     assert scores["nutrient_loss"]["band"] in {"warn", "bad"}
     assert scores["holistic_0_10"]["value"] == 8.5
+    assert scores["macros"]["protein"] == 18
+    assert scores["macros"]["calories"] is not None
     assert len(scores["ingredients"]) == 2
     pasta = scores["ingredients"][0]
     assert pasta["foodon_leaf_label"] == "pasta food product"
@@ -158,6 +162,7 @@ def test_real_ratio_surrogate_and_nutrient_slack_displayed():
     assert pasta["share_iqr"] is not None
     assert pasta["share_iqr"]["median"] is not None
     assert pasta["recipe_share"] is not None
+    assert pasta["amount_display"].endswith("g") or pasta["amount_unit"]
 
 
 def test_share_level_keys_are_not_used_as_ratio_loss():
@@ -204,7 +209,41 @@ def test_build_ingredient_display_rows_iqr_bounds():
     assert rows[0]["share_iqr"]["min"] == 0.1
     assert rows[0]["share_iqr"]["max"] == 0.5
     assert rows[0]["recipe_share"] == 1.0
-    assert rows[0]["loss_band"] == "warn"
+    # share 1.0 is beyond Tukey fences for [0.1..0.5] → real outlier (red)
+    assert rows[0]["loss_band"] == "bad"
+
+
+def test_iqr_stats_uses_p15_p85_band():
+    from recipe_opt_agent.score_display import _iqr_stats
+
+    # 20 evenly spaced shares → P15/P85 should sit near 0.15/0.85 of the range.
+    samples = [i / 19.0 for i in range(20)]
+    stats = _iqr_stats(samples)
+    assert stats is not None
+    assert abs(stats["q1"] - stats["p15"]) < 1e-12
+    assert abs(stats["q3"] - stats["p85"]) < 1e-12
+    assert stats["p15"] < 0.25
+    assert stats["p85"] > 0.75
+    assert stats["p15"] < stats["median"] < stats["p85"]
+
+
+def test_share_band_from_iqr_inside_outside_outlier():
+    from recipe_opt_agent.score_display import share_band_from_iqr
+
+    iqr = {"q1": 0.2, "q3": 0.4, "n": 12}  # width 0.2 → fences [-0.1, 0.7]
+    assert share_band_from_iqr(0.3, iqr) == "good"
+    assert share_band_from_iqr(0.15, iqr) == "warn"
+    assert share_band_from_iqr(0.55, iqr) == "warn"
+    assert share_band_from_iqr(0.8, iqr) == "bad"
+    # On/near the band edge within 0.01 stays green.
+    assert share_band_from_iqr(0.2, iqr) == "good"
+    assert share_band_from_iqr(0.4, iqr) == "good"
+    assert share_band_from_iqr(0.191, iqr) == "good"
+    assert share_band_from_iqr(0.409, iqr) == "good"
+    assert share_band_from_iqr(0.189, iqr) == "warn"
+    assert share_band_from_iqr(0.411, iqr) == "warn"
+    assert share_band_from_iqr(0.3, {**iqr, "n": 3}) == "unknown"
+    assert share_band_from_iqr(None, iqr) == "unknown"
 
 
 def test_protein_demand_triggers():

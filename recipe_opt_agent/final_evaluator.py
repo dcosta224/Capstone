@@ -31,10 +31,14 @@ You receive:
 - final_recipe: ingredients, diff vs original, optimizer losses, PFC vs macro box
 - dietary_precheck: deterministic tag scan (trust violations listed there)
 - neighborhood_evidence for added ingredients (co-occurrence in expanded neighborhood)
+- taste_preference (optional): an explicit sensory/lifestyle ask from the user
+  (e.g. lighter, smokier, brighter lemon, weeknight-simpler). When present, judge
+  whether the OUTPUT actually reflects that preference.
 
 Score dimensions (0–10 each, then overall_score_0_10):
 1. ingredients_make_sense — culinary plausibility for this dish given stretch level
-2. meets_user_needs — macros + request + identity roles
+   (also penalize kitchen-implausible quantities: e.g. 80g spice powders)
+2. meets_user_needs — macros + request + identity roles + taste_preference when given
 3. fidelity_vs_stretch — ratio/IQR losses interpreted WITH hull stretch context
 4. overall_score_0_10 — holistic, not a naive average of losses
 
@@ -46,6 +50,8 @@ Rules:
 - When stretch is outside_hull, a plausible_extension (e.g. lean poultry in pasta) can
   score well if neighborhood evidence supports it; clash ingredients still score poorly.
 - Comment on whether the OUTPUT actually satisfies the macro box (nutrient_slack).
+- When taste_preference is present, set taste_preference_met to yes|partially|no and
+  explain briefly in concerns/strengths. Do not award "yes" if the preference is ignored.
 
 Return ONLY JSON:
 {
@@ -55,6 +61,7 @@ Return ONLY JSON:
   "fidelity_vs_stretch_score_0_10": 0-10,
   "ingredients_make_sense": "yes"|"mostly"|"no",
   "meets_user_needs": "yes"|"partially"|"no",
+  "taste_preference_met": "yes"|"partially"|"no"|null,
   "dietary_restrictions_met": true|false,
   "dietary_violation_flag": true|false,
   "dietary_violations": [{"label": "...", "tag_ids": ["..."]}],
@@ -252,6 +259,11 @@ def build_final_eval_briefing(
         },
         "dietary_precheck": dietary_precheck(ingredients, tags),
         "neighborhood_evidence": _neighborhood_evidence(diff["added"], problem),
+        "taste_preference": (
+            state.get("taste_preference")
+            or final_payload.get("taste_preference")
+            or problem.get("taste_preference")
+        ),
     }
 
 

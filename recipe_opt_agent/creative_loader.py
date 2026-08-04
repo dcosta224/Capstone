@@ -16,11 +16,13 @@ def load_creative_problem(
     fat_min: float = 0.245,
     fat_max: float = 0.445,
     offline: bool = False,
+    require_cache: bool = True,
 ) -> dict[str, Any]:
     """Build a problem stub for creative mode.
 
     When canonical_id is set, loads neighborhood FDC catalog + basis samples from DB.
     When offline=True, skips DB and uses heuristic grounding only.
+    When a dish is selected, ``require_cache`` (default True) refuses live Jaccard rebuilds.
     """
     if offline or canonical_id is None:
         return {
@@ -54,6 +56,10 @@ def load_creative_problem(
             "ratio_samples": [4.0, 5.0, 6.0],
         }
 
+    from recipe_opt_agent.example_recipe import (
+        attach_example_recipe_to_problem,
+        example_from_problem_start,
+    )
     from recipe_opt_agent.problem_loader import load_canonical_problem
 
     base = load_canonical_problem(
@@ -64,13 +70,44 @@ def load_creative_problem(
         carb_max=carb_max,
         fat_min=fat_min,
         fat_max=fat_max,
-        prefer_nutrition_start=False,
+        # Pick the neighborhood recipe closest to the macro target (midpoint if
+        # any recipe is in-box, else nearest box edge) so the LLM draft has a
+        # human reference that already needs few nutrition edits.
+        prefer_nutrition_start=True,
+        start_metric="l1_pfc",
         fast_neighborhood=True,
+        require_cache=require_cache,
     )
     base["user_request"] = user_request
     base["taste_text"] = user_request
     base["creative_offline"] = False
-    return base
+    example = example_from_problem_start(base)
+    if example is None:
+        # Fallback: rebuild example from lines if chosen_recipe lacked rows.
+        try:
+            from canonical_optimization import CanonicalNeighborhood
+            from recipe_opt_agent.example_recipe import pick_example_recipe_near_targets
+
+            nb = CanonicalNeighborhood.build(
+                int(canonical_id), fast=True, use_cache=True, require_cache=require_cache
+            )
+            example = pick_example_recipe_near_targets(
+                lines_df=nb.lines_df,
+                recipe_ids=list(map(str, nb.recipe_ids or [])),
+                query=user_request or str(base.get("title") or ""),
+                target_box={
+                    "protein_min": protein_min,
+                    "protein_max": protein_max,
+                    "carb_min": carb_min,
+                    "carb_max": carb_max,
+                    "fat_min": fat_min,
+                    "fat_max": fat_max,
+                },
+                titles_by_id={},
+            )
+        except Exception:
+            example = None
+    return attach_example_recipe_to_problem(base, example)
 
 
 def _offline_fdc_catalog() -> list[dict[str, Any]]:

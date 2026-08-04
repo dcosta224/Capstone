@@ -43,7 +43,7 @@ from recipe_opt_agent.problem_loader import (
 )
 from recipe_opt_agent.runner import run_recipe_opt_agent
 
-app = FastAPI(title="Recipe Opt Agent", version="0.1.0")
+app = FastAPI(title="MacroIQ", version="0.2.0")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -77,13 +77,23 @@ SSE_HEADERS = {
 
 class RunRequest(BaseModel):
     mode: str = Field(default="neighborhood", description="neighborhood | creative")
-    user_request: str = Field(default="", description="Creative mode free-text request")
+    user_request: str = Field(default="", description="Optional free-text request / taste notes")
     taste_text: str = Field(default="", description="Optional; defaults to selected recipe title")
     title: str = Field(default="")
-    canonical_id: int | None = Field(default=None, description="Canonical dish id (optional in creative mode)")
+    canonical_id: int | None = Field(default=None, description="Canonical dish id (required for MacroIQ)")
     start_metric: str = Field(
         default="l1_pfc",
         description="Neighborhood start pick: l1_pfc | loss_projection",
+    )
+    use_macro_targets: bool = Field(
+        default=True,
+        description="When false, ignore PFC box and minimize ratio/empirical loss only",
+    )
+    kcal_target: float | None = Field(
+        default=None,
+        ge=100,
+        le=8000,
+        description="Optional calorie target; scales total mass to match",
     )
     protein_min: float = Field(default=0.19, ge=0, le=1)
     protein_max: float = Field(default=0.23, ge=0, le=1)
@@ -96,26 +106,58 @@ class RunRequest(BaseModel):
     max_iterations: int = Field(default=3, ge=1, le=10)
 
 
+def _apply_kcal_target(problem: dict, kcal_target: float | None) -> dict:
+    """Override problem kcal (and scale mass/x0) when the user sets a calorie target."""
+    from recipe_opt_agent.kcal_utils import apply_kcal_target
+
+    return apply_kcal_target(problem, kcal_target)
+
+
 def _sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
-@app.get("/")
-def index():
-    """Serve the playground HTML with cache-busted static asset URLs.
-
-    Browsers aggressively cache /static/*.css|js; without a version query the
-    compute-kind color CSS can look "missing" after a --reload restart.
-    """
-    html_path = STATIC_DIR / "index.html"
+def _cache_busted_html(filename: str, asset_names: tuple[str, ...]) -> HTMLResponse:
+    """Serve HTML with mtime query params on linked static assets."""
+    html_path = STATIC_DIR / filename
     html = html_path.read_text(encoding="utf-8")
-    for name in ("styles.css", "app.js"):
+    for name in asset_names:
         path = STATIC_DIR / name
         ver = int(path.stat().st_mtime) if path.is_file() else 0
         html = html.replace(f"/static/{name}", f"/static/{name}?v={ver}")
     return HTMLResponse(
         content=html,
         headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/")
+def index():
+    """MacroIQ product UI (semantic ask + macros + canonical menu + live progress)."""
+    return _cache_busted_html("macroiq.html", ("macroiq.css", "macroiq.js"))
+
+
+@app.get("/playground")
+def playground():
+    """Developer playground: flow graph, transcript, and node inspector."""
+    return _cache_busted_html("index.html", ("styles.css", "app.js"))
+
+
+@app.get("/loop-demo")
+def loop_demo():
+    """Lightweight presentation demo of the online agent loop (separate from playground)."""
+    return _cache_busted_html(
+        "loop_demo.html",
+        ("loop_demo.css", "loop_demo.js"),
+    )
+
+
+@app.get("/animated-demo")
+def animated_demo():
+    """Timed ~20s graph walkthrough of the agent loop (no LLM / API calls)."""
+    return _cache_busted_html(
+        "animated_demo.html",
+        ("animated_demo.css", "animated_demo.js"),
     )
 
 
@@ -396,7 +438,7 @@ class MacroTargetSuggestRequest(BaseModel):
 
 @app.post("/api/macro_targets/suggest")
 def macro_targets_suggest(req: MacroTargetSuggestRequest):
-    """Suggest neighborhood-mean ±5% macro box."""
+    """Suggest a neighborhood coverage macro box (≤10pp bands covering most recipes)."""
     from recipe_opt_agent.macro_target_suggestions import suggest_macro_targets_for_canonical
 
     try:
@@ -408,6 +450,8 @@ def macro_targets_suggest(req: MacroTargetSuggestRequest):
                 "fat": float(req.fat_half),
             },
             fast_neighborhood=True,
+            # Prefer cache; live rebuild on miss so dish selection still works.
+            require_cache=False,
         )
     except Exception as exc:
         raise HTTPException(503, f"Could not suggest macro targets: {exc}") from exc
@@ -450,30 +494,46 @@ def validate_macro_box(
 
 @app.post("/api/run")
 def run(req: RunRequest):
-    box_errors = validate_macro_box(
-        req.protein_min,
-        req.protein_max,
-        req.carb_min,
-        req.carb_max,
-        req.fat_min,
-        req.fat_max,
-    )
-    if box_errors:
-        raise HTTPException(400, "Infeasible macro targets: " + "; ".join(box_errors))
+    use_macros = bool(req.use_macro_targets)
+    if use_macros:
+        box_errors = validate_macro_box(
+            req.protein_min,
+            req.protein_max,
+            req.carb_min,
+            req.carb_max,
+            req.fat_min,
+            req.fat_max,
+        )
+        if box_errors:
+            raise HTTPException(400, "Infeasible macro targets: " + "; ".join(box_errors))
+        protein_min, protein_max = req.protein_min, req.protein_max
+        carb_min, carb_max = req.carb_min, req.carb_max
+        fat_min, fat_max = req.fat_min, req.fat_max
+        nutrition_slack_weight: float | None = 1.0
+    else:
+        # Unconstrained PFC: keep fractions in the simplex but do not penalize
+        # deviation from a user box — minimize empirical / ratio loss only.
+        protein_min, protein_max = 0.0, 1.0
+        carb_min, carb_max = 0.0, 1.0
+        fat_min, fat_max = 0.0, 1.0
+        nutrition_slack_weight = 0.0
     cfg = AgentConfig(
-        protein_min=req.protein_min,
-        protein_max=req.protein_max,
-        carb_min=req.carb_min,
-        carb_max=req.carb_max,
-        fat_min=req.fat_min,
-        fat_max=req.fat_max,
+        protein_min=protein_min,
+        protein_max=protein_max,
+        carb_min=carb_min,
+        carb_max=carb_max,
+        fat_min=fat_min,
+        fat_max=fat_max,
         F_accept=req.F_accept,
         F_max=req.F_max,
         max_iterations=req.max_iterations,
+        nutrition_slack_weight=nutrition_slack_weight,
+        kcal_target=float(req.kcal_target) if req.kcal_target is not None else None,
     )
 
     def event_stream():
         q: queue.Queue = queue.Queue()
+        run_id_holder: dict[str, str | None] = {"id": None}
 
         def emit(etype: str, data: dict) -> None:
             q.put(_sse_event(etype, data))
@@ -483,8 +543,44 @@ def run(req: RunRequest):
             emit(etype, ev)
 
         def worker() -> None:
+            from recipe_opt_web.run_log import finish_macroiq_run, start_macroiq_run
+
+            mode = (req.mode or "neighborhood").strip().lower()
+            request_snapshot = {
+                "mode": mode,
+                "canonical_id": req.canonical_id,
+                "title": req.title,
+                "taste_text": req.taste_text,
+                "user_request": req.user_request,
+                "kcal_target": req.kcal_target,
+                "use_macro_targets": use_macros,
+                "start_metric": req.start_metric,
+                "protein_min": req.protein_min,
+                "protein_max": req.protein_max,
+                "carb_min": req.carb_min,
+                "carb_max": req.carb_max,
+                "fat_min": req.fat_min,
+                "fat_max": req.fat_max,
+                "F_accept": req.F_accept,
+                "F_max": req.F_max,
+                "max_iterations": req.max_iterations,
+            }
+            run_id_holder["id"] = start_macroiq_run(
+                mode=mode,
+                request=request_snapshot,
+                config={
+                    "protein_min": protein_min,
+                    "protein_max": protein_max,
+                    "carb_min": carb_min,
+                    "carb_max": carb_max,
+                    "fat_min": fat_min,
+                    "fat_max": fat_max,
+                    "kcal_target": cfg.kcal_target,
+                    "nutrition_slack_weight": nutrition_slack_weight,
+                    "max_iterations": cfg.max_iterations,
+                },
+            )
             try:
-                mode = (req.mode or "neighborhood").strip().lower()
                 creative = mode == "creative"
                 if not creative and req.canonical_id is None:
                     raise ValueError("canonical_id is required for neighborhood mode")
@@ -505,17 +601,29 @@ def run(req: RunRequest):
                     problem = load_creative_problem(
                         user_request=req.user_request or req.taste_text,
                         canonical_id=req.canonical_id,
-                        protein_min=req.protein_min,
-                        protein_max=req.protein_max,
-                        carb_min=req.carb_min,
-                        carb_max=req.carb_max,
-                        fat_min=req.fat_min,
-                        fat_max=req.fat_max,
+                        protein_min=protein_min,
+                        protein_max=protein_max,
+                        carb_min=carb_min,
+                        carb_max=carb_max,
+                        fat_min=fat_min,
+                        fat_max=fat_max,
                         offline=req.canonical_id is None,
+                        # Prefer Jaccard cache; rebuild live on miss so Optimize still runs.
+                        require_cache=False,
                     )
+                    problem = _apply_kcal_target(problem, req.kcal_target)
                     title = req.title or problem.get("title") or "Creative Recipe"
                     taste_text = (req.user_request or req.taste_text or "").strip() or title
                     cache_hit = bool(problem.get("neighborhood_from_cache"))
+                    if req.canonical_id is None:
+                        nb_note = " · offline stub (no dish selected; neighborhood cache N/A)"
+                        nb_flag = None
+                    elif cache_hit:
+                        nb_note = " · neighborhood from Jaccard cache"
+                        nb_flag = True
+                    else:
+                        nb_note = " · neighborhood rebuilt live (Jaccard cache miss)"
+                        nb_flag = False
                     emit(
                         "load",
                         {
@@ -523,13 +631,10 @@ def run(req: RunRequest):
                             "phase": "agent_start",
                             "message": (
                                 "Starting creative LangGraph (draft → ground → diagnose loop → finalists)…"
-                                + (
-                                    f" · neighborhood {'from Jaccard cache' if cache_hit else 'built live'}"
-                                    if req.canonical_id is not None
-                                    else ""
-                                )
+                                + nb_note
                             ),
-                            "neighborhood_from_cache": cache_hit if req.canonical_id is not None else None,
+                            "neighborhood_from_cache": nb_flag,
+                            "dequant_cache_expected": req.canonical_id is not None,
                         },
                     )
                     from recipe_opt_agent.observability import run_config as lg_run_config
@@ -556,6 +661,12 @@ def run(req: RunRequest):
                         user_request=req.user_request or taste_text,
                         langgraph_config=lg_cfg,
                     )
+                    finish_macroiq_run(
+                        run_id_holder["id"],
+                        status="done",
+                        final=result if isinstance(result, dict) else None,
+                        mode="creative",
+                    )
                     emit("result", {"type": "result", "final": result, "mode": "creative"})
                     return
 
@@ -574,18 +685,21 @@ def run(req: RunRequest):
                 )
                 problem = load_canonical_problem(
                     int(req.canonical_id),
-                    protein_min=req.protein_min,
-                    protein_max=req.protein_max,
-                    carb_min=req.carb_min,
-                    carb_max=req.carb_max,
-                    fat_min=req.fat_min,
-                    fat_max=req.fat_max,
+                    protein_min=protein_min,
+                    protein_max=protein_max,
+                    carb_min=carb_min,
+                    carb_max=carb_max,
+                    fat_min=fat_min,
+                    fat_max=fat_max,
                     prefer_nutrition_start=True,
                     start_metric=req.start_metric or "l1_pfc",
                     fast_neighborhood=True,
+                    # Prefer Jaccard cache; rebuild live on miss so Optimize still runs.
+                    require_cache=False,
                 )
+                problem = _apply_kcal_target(problem, req.kcal_target)
                 title = req.title or problem.get("title") or f"canonical {req.canonical_id}"
-                taste_text = (req.taste_text or "").strip() or problem.get("taste_text") or title
+                taste_text = (req.taste_text or req.user_request or "").strip() or problem.get("taste_text") or title
                 chosen = problem.get("chosen_recipe") or {}
                 sel = (chosen.get("selection") or {}) if isinstance(chosen, dict) else {}
                 metric_note = sel.get("method") or req.start_metric
@@ -594,7 +708,17 @@ def run(req: RunRequest):
                     problem.get("neighborhood_from_cache")
                     or sel.get("neighborhood_from_cache")
                 )
-                cache_note = "Jaccard cache hit" if from_cache else "cache miss · fast basis"
+                cache_note = "Jaccard cache hit" if from_cache else "live neighborhood rebuild"
+                macro_note = (
+                    " · macro targets on"
+                    if use_macros
+                    else " · ratio-loss only (no macro targets)"
+                )
+                kcal_note = (
+                    f" · {int(req.kcal_target)} kcal target"
+                    if req.kcal_target is not None
+                    else ""
+                )
                 emit(
                     "load",
                     {
@@ -604,7 +728,8 @@ def run(req: RunRequest):
                             f"Selected starting NLG recipe {chosen.get('recipe_nlg_id')} "
                             f"via {metric_note}"
                             + (f" (fallback: {fallback})" if fallback else "")
-                            + f" · {cache_note} · {len(chosen.get('ingredients') or [])} ingredients · "
+                            + f" · {cache_note}{macro_note}{kcal_note} · "
+                            f"{len(chosen.get('ingredients') or [])} ingredients · "
                             f"{len(problem.get('neighborhood_recipes') or [])} neighborhood recipes."
                         ),
                         "chosen_recipe": chosen,
@@ -613,6 +738,8 @@ def run(req: RunRequest):
                         "start_metric": req.start_metric,
                         "selection": sel,
                         "neighborhood_from_cache": from_cache,
+                        "use_macro_targets": use_macros,
+                        "kcal_target": req.kcal_target,
                     },
                 )
                 emit(
@@ -646,8 +773,20 @@ def run(req: RunRequest):
                     agent_mode="neighborhood",
                     langgraph_config=lg_cfg,
                 )
+                finish_macroiq_run(
+                    run_id_holder["id"],
+                    status="done",
+                    final=result if isinstance(result, dict) else None,
+                    mode="neighborhood",
+                )
                 emit("result", {"type": "result", "final": result, "mode": "neighborhood"})
             except Exception as exc:
+                finish_macroiq_run(
+                    run_id_holder["id"],
+                    status="error",
+                    error_message=str(exc),
+                    mode=(req.mode or "neighborhood").strip().lower(),
+                )
                 emit("error", {"type": "error", "error": str(exc)})
             finally:
                 q.put(None)
@@ -664,6 +803,52 @@ def run(req: RunRequest):
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )
+
+
+class RecomputeRequest(BaseModel):
+    problem: dict = Field(default_factory=dict)
+    ingredients: list[dict] = Field(default_factory=list)
+    grams: list[float] = Field(default_factory=list)
+    macro_targets: dict = Field(default_factory=dict)
+    score_history: list[dict] = Field(default_factory=list)
+    baseline_ratio: float | None = Field(default=None)
+
+
+@app.post("/api/recipe/recompute")
+def recipe_recompute(req: RecomputeRequest):
+    """Recompute macros / cookability after an interactive gram edit."""
+    from recipe_opt_agent.score_display import recompute_recipe_at_grams
+
+    if not req.grams:
+        raise HTTPException(400, "grams is required")
+    try:
+        return recompute_recipe_at_grams(
+            problem=req.problem,
+            ingredients=req.ingredients,
+            grams=[float(g) for g in req.grams],
+            macro_targets=req.macro_targets or None,
+            score_history=req.score_history,
+            baseline_ratio=req.baseline_ratio,
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"Recompute failed: {exc}") from exc
+
+
+@app.get("/api/portions/{fdc_id}")
+def portions_for_fdc(fdc_id: int, grams: float = Query(default=100.0, gt=0)):
+    """Suggest a kitchen amount for an FDC food at a given gram weight."""
+    from recipe_opt_agent.portion_display import kitchen_amount_from_usda_portions
+
+    try:
+        from db import connect
+        from portion_gram import load_portion_rows_cache
+
+        with connect() as conn:
+            cache = load_portion_rows_cache(conn, {int(fdc_id)})
+        suggestion = kitchen_amount_from_usda_portions(float(grams), cache.get(int(fdc_id)) or [])
+    except Exception as exc:
+        raise HTTPException(503, f"Portion lookup failed: {exc}") from exc
+    return {"fdc_id": int(fdc_id), "grams": float(grams), "suggestion": suggestion}
 
 
 if __name__ == "__main__":

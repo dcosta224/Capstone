@@ -98,3 +98,6 @@ class AgentState(TypedDict, total=False):
     final: dict[str, Any]
     status: str
     error: str | None
+    # async GPT-5.5 shadow draft (joined before finalists / arbiter)
+    shadow_job_id: str | None
+    _shadow_collect_meta: dict[str, Any]

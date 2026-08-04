@@ -87,6 +87,38 @@ Return ONLY JSON:
 }
 """
 
+
+WEIRDNESS_FLAGGER_SYSTEM_PROMPT = """You screen recipe candidates for culinary disasters ONLY.
+
+You receive several recipe candidates for the same dish (ingredient lists, diffs vs the original,
+and neighborhood co-occurrence evidence). Your job is NOT to rank them on macros or fidelity.
+
+Flag a candidate as weird ONLY when it has truly identity-destroying or absurd ingredients for
+this dish — e.g. syrup/jam in a carbonara, onion rings in a stew, coffee grounds in bread,
+random dessert toppings in a savory entrée, or stacked soft dairy that collapses the dish.
+
+Do NOT flag:
+- plausible extensions (chicken carbonara, turkey chili, tofu stir-fry variants)
+- ordinary seasoning, oil, aromatics, or garnish that cooks commonly use
+- modest swaps that keep the dish recognizable
+- recipes that are merely imperfect on macros or proportions
+
+When neighborhood evidence shows an added ingredient in ≥20% of shell recipes, do NOT flag it
+as weird. Prefer false negatives over false positives — only catch the obvious disasters.
+
+Return ONLY JSON:
+{
+  "flags": {
+    "<candidate_id>": {
+      "is_weird": true|false,
+      "odd_ingredients": ["labels that make it weird, else []"],
+      "note": "one short sentence if weird, else empty string"
+    }
+  }
+}
+"""
+
+
 _EPS = 1e-9
 
 
@@ -274,11 +306,13 @@ def _attach_pct_vs_best(cards: list[dict[str, Any]]) -> None:
                 c["losses"][f"{metric}_pct_vs_best"] = "best" if pct <= 0.01 else f"+{pct:.1f}% worse than best"
 
 
-def collect_arbiter_candidates(state: dict[str, Any], *, max_candidates: int = 6) -> list[dict[str, Any]]:
+def collect_arbiter_candidates(state: dict[str, Any], *, max_candidates: int = 4) -> list[dict[str, Any]]:
     """Distinct saved recipe snapshots: pool entries + path-family champions + current."""
     from recipe_opt_agent.score_display import select_path_finalists
+    from recipe_opt_agent.shadow_gpt_candidate import force_include_shadow, is_shadow_candidate
 
     cfg = state.get("config") or {}
+    max_candidates = int(cfg.get("max_finalists") or max_candidates or 4)
     raw: list[dict[str, Any]] = []
     for entry in state.get("candidate_pool") or []:
         raw.append(dict(entry))
@@ -326,9 +360,15 @@ def collect_arbiter_candidates(state: dict[str, Any], *, max_candidates: int = 6
         )
 
     # Dedup by ingredient label set (keep the first, which has richer metadata).
+    # Always preserve the silent optimized draft even if label sets collide.
     seen: set[frozenset[str]] = set()
+    shadow: list[dict[str, Any]] = []
     out: list[dict[str, Any]] = []
     for cand in raw:
+        if is_shadow_candidate(cand):
+            if not shadow:
+                shadow.append(cand)
+            continue
         labels = frozenset(
             str(r.get("label") or r.get("name") or "").lower()
             for r in (cand.get("ingredients") or [])
@@ -337,7 +377,7 @@ def collect_arbiter_candidates(state: dict[str, Any], *, max_candidates: int = 6
             continue
         seen.add(labels)
         out.append(cand)
-    return out[:max_candidates]
+    return force_include_shadow(shadow + out, max_n=max_candidates)
 
 
 def _heuristic_verdict(cards: list[dict[str, Any]]) -> dict[str, Any]:
@@ -369,6 +409,14 @@ def arbitrate_final_recipe(
     model: str | None = None,
 ) -> dict[str, Any] | None:
     """Run the final judgment. Returns `{winner_id, ranking, verdicts, rationale, comparison, _llm_trace}`."""
+    import logging
+
+    from recipe_opt_agent.shadow_gpt_candidate import (
+        is_shadow_candidate,
+        shadow_arbiter_consideration,
+    )
+
+    _log = logging.getLogger(__name__)
     cfg = state.get("config") or {}
     problem = state.get("problem") or {}
     original = list(state.get("original_ingredients") or [])
@@ -393,6 +441,16 @@ def arbitrate_final_recipe(
         cards.append(card)
         by_id[card["candidate_id"]] = cand
     if len(cards) < 2:
+        consideration = shadow_arbiter_consideration(
+            candidates=candidates,
+            winner_id=None,
+            collect_meta=state.get("_shadow_collect_meta") or state.get("shadow_collect_meta"),
+            model=str(cfg.get("shadow_draft_model") or "gpt-5.5"),
+        )
+        _log.info(
+            "final_arbiter: skipped (need ≥2 cards); shadow consideration=%s",
+            consideration,
+        )
         return None
     _attach_pct_vs_best(cards)
 
@@ -419,12 +477,32 @@ def arbitrate_final_recipe(
         {"role": "user", "content": json.dumps(briefing, indent=2, default=str)},
     ]
 
+    def _with_consideration(result: dict[str, Any]) -> dict[str, Any]:
+        consideration = shadow_arbiter_consideration(
+            candidates=list(by_id.values()),
+            winner_id=result.get("winner_id"),
+            collect_meta=state.get("_shadow_collect_meta") or state.get("shadow_collect_meta"),
+            model=str(cfg.get("shadow_draft_model") or "gpt-5.5"),
+        )
+        # Also note whether any arbiter card came from the shadow model.
+        consideration["shadow_card_in_briefing"] = any(
+            is_shadow_candidate(by_id.get(c["candidate_id"]) or {}) for c in cards
+        )
+        result["_shadow_consideration"] = consideration
+        _log.info(
+            "final_arbiter: GPT-5.5 shadow in set=%s ids=%s winner_is_shadow=%s",
+            consideration.get("shadow_in_arbiter_set"),
+            consideration.get("shadow_candidate_ids"),
+            consideration.get("winner_is_shadow"),
+        )
+        return result
+
     if not os.environ.get("OPENAI_API_KEY"):
         result = _heuristic_verdict(cards)
         result["comparison"] = cards
         result["winner_entry"] = by_id.get(result["winner_id"])
         result["_llm_trace"] = {"mode": "heuristic", "model": None, "messages": messages}
-        return result
+        return _with_consideration(result)
 
     model = model or str(cfg.get("judge_model") or "gpt-4.1-mini")
     try:
@@ -449,20 +527,240 @@ def arbitrate_final_recipe(
             "error": str(exc),
             "messages": messages,
         }
-        return result
+        return _with_consideration(result)
 
     known_ids = {c["candidate_id"] for c in cards}
     winner_id = str(data.get("winner_id") or "")
     if winner_id not in known_ids:
         winner_id = _heuristic_verdict(cards)["winner_id"]
+    return _with_consideration(
+        {
+            "winner_id": winner_id,
+            "ranking": [r for r in (data.get("ranking") or []) if r in known_ids],
+            "verdicts": data.get("verdicts") or {},
+            "rationale": data.get("rationale"),
+            "holistic_0_10": data.get("holistic_0_10"),
+            "comparison": cards,
+            "winner_entry": by_id.get(winner_id),
+            "_llm_trace": {
+                "mode": "openai",
+                "model": model,
+                "messages": messages,
+                "raw_response": content,
+                "usage": {
+                    "prompt_tokens": getattr(getattr(resp, "usage", None), "prompt_tokens", None),
+                    "completion_tokens": getattr(getattr(resp, "usage", None), "completion_tokens", None),
+                },
+            },
+        }
+    )
+
+
+def weird_ids_from_judgment(judgment: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Normalize LLM weirdness flags / clash verdicts → ``{candidate_id: flag_dict}``."""
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(judgment, dict):
+        return out
+    flags = judgment.get("flags")
+    if isinstance(flags, dict):
+        for cid, raw in flags.items():
+            if not isinstance(raw, dict):
+                continue
+            odd = [str(x) for x in (raw.get("odd_ingredients") or []) if str(x).strip()]
+            is_weird = bool(raw.get("is_weird")) or bool(odd)
+            if not is_weird:
+                continue
+            out[str(cid)] = {
+                "is_weird": True,
+                "odd_ingredients": odd,
+                "note": str(raw.get("note") or "").strip(),
+            }
+        return out
+    verdicts = judgment.get("verdicts")
+    if isinstance(verdicts, dict):
+        for cid, raw in verdicts.items():
+            if not isinstance(raw, dict):
+                continue
+            fit = str(raw.get("culinary_fit") or "").strip().lower()
+            odd = [str(x) for x in (raw.get("odd_ingredients") or []) if str(x).strip()]
+            # Full-arbiter path: only demote explicit clashes, not plausible extensions.
+            if fit != "clash":
+                continue
+            out[str(cid)] = {
+                "is_weird": True,
+                "odd_ingredients": odd,
+                "note": str(raw.get("note") or "").strip(),
+                "culinary_fit": fit or "clash",
+            }
+    return out
+
+
+def flag_weird_candidates(
+    state: dict[str, Any],
+    *,
+    model: str | None = None,
+) -> dict[str, Any] | None:
+    """LLM screen: flag only obviously-bad ingredient lists. Does not rank winners."""
+    import logging
+
+    _log = logging.getLogger(__name__)
+    cfg = state.get("config") or {}
+    problem = state.get("problem") or {}
+    original = list(state.get("original_ingredients") or [])
+    if not original:
+        original = list(
+            ((problem.get("retrieval_context") or {}).get("starting_ingredients"))
+            or (problem.get("chosen_recipe") or {}).get("ingredients")
+            or []
+        )
+    box = {
+        k: cfg.get(k)
+        for k in ("protein_min", "protein_max", "carb_min", "carb_max", "fat_min", "fat_max")
+    }
+
+    candidates = collect_arbiter_candidates(state)
+    cards: list[dict[str, Any]] = []
+    for cand in candidates:
+        card = _candidate_card(cand, original=original, problem=problem, box=box)
+        if card is not None:
+            cards.append(card)
+    if len(cards) < 1:
+        return None
+    if len(cards) == 1:
+        cid = cards[0]["candidate_id"]
+        return {
+            "flags": {cid: {"is_weird": False, "odd_ingredients": [], "note": ""}},
+            "weird_candidate_ids": [],
+            "rationale": "Single candidate — nothing to demote.",
+            "comparison": cards,
+            "_llm_trace": {"mode": "skip_single", "model": None},
+        }
+
+    # Compact briefing: ingredients + diffs + evidence only (no loss ranking task).
+    briefing = {
+        "title": state.get("title"),
+        "user_request": state.get("user_request") or state.get("taste_text"),
+        "requirement_tags": state.get("requirement_tags") or [],
+        "identity_roles": state.get("identity_roles") or [],
+        "original_ingredients": [
+            {"label": r.get("label") or r.get("name"), "grams": r.get("grams")} for r in original
+        ],
+        "candidates": [
+            {
+                "candidate_id": c["candidate_id"],
+                "branch": c.get("branch"),
+                "ingredients": c.get("ingredients"),
+                "diff_vs_original": c.get("diff_vs_original"),
+                "neighborhood_evidence": c.get("neighborhood_evidence"),
+            }
+            for c in cards
+        ],
+        "note": (
+            "Flag only culinary disasters. Do not rank. Plausible extensions are fine. "
+            "Prefer missing a subtle oddity over demoting a normal recipe."
+        ),
+    }
+    messages = [
+        {"role": "system", "content": WEIRDNESS_FLAGGER_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(briefing, indent=2, default=str)},
+    ]
+
+    known_ids = {c["candidate_id"] for c in cards}
+    empty_flags = {
+        cid: {"is_weird": False, "odd_ingredients": [], "note": ""} for cid in known_ids
+    }
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        # Offline: denylist-style heuristic on added labels when available.
+        flags = dict(empty_flags)
+        try:
+            from recipe_opt_agent.clash_gates import clash_reason_for_label
+
+            title = str(state.get("title") or "")
+            for c in cards:
+                current = [
+                    str(r.get("label") or r.get("name") or "")
+                    for r in (c.get("ingredients") or [])
+                ]
+                odd: list[str] = []
+                for label in current:
+                    reason = clash_reason_for_label(label, current_labels=current, title=title)
+                    if reason:
+                        odd.append(label)
+                if odd:
+                    flags[c["candidate_id"]] = {
+                        "is_weird": True,
+                        "odd_ingredients": odd[:6],
+                        "note": "Heuristic denylist / clash-family hit",
+                    }
+        except Exception:
+            pass
+        weird_ids = [cid for cid, f in flags.items() if f.get("is_weird")]
+        return {
+            "flags": flags,
+            "weird_candidate_ids": weird_ids,
+            "rationale": (
+                f"Heuristic weirdness screen flagged {len(weird_ids)} candidate(s)."
+                if weird_ids
+                else "Heuristic weirdness screen found no disasters."
+            ),
+            "comparison": cards,
+            "_llm_trace": {"mode": "heuristic", "model": None, "messages": messages},
+        }
+
+    model = model or str(cfg.get("judge_model") or "gpt-4.1-mini")
+    try:
+        from recipe_opt_agent.observability import get_openai_client
+
+        client = get_openai_client()
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=messages,
+        )
+        content = resp.choices[0].message.content or "{}"
+        data = _extract_json(content)
+    except Exception as exc:
+        _log.warning("flag_weird_candidates LLM failed: %s", exc)
+        return {
+            "flags": empty_flags,
+            "weird_candidate_ids": [],
+            "rationale": "Weirdness screen failed; left ranking unchanged.",
+            "comparison": cards,
+            "_llm_trace": {
+                "mode": "error",
+                "model": model,
+                "error": str(exc),
+                "messages": messages,
+            },
+        }
+
+    flags = dict(empty_flags)
+    raw_flags = data.get("flags") if isinstance(data, dict) else None
+    if isinstance(raw_flags, dict):
+        for cid, raw in raw_flags.items():
+            if str(cid) not in known_ids or not isinstance(raw, dict):
+                continue
+            odd = [str(x) for x in (raw.get("odd_ingredients") or []) if str(x).strip()]
+            is_weird = bool(raw.get("is_weird")) or bool(odd)
+            flags[str(cid)] = {
+                "is_weird": is_weird,
+                "odd_ingredients": odd if is_weird else [],
+                "note": str(raw.get("note") or "").strip() if is_weird else "",
+            }
+    weird_ids = [cid for cid, f in flags.items() if f.get("is_weird")]
+    n_weird = len(weird_ids)
+    rationale = (
+        f"Demoted {n_weird} candidate(s) with odd ingredients to the end."
+        if n_weird
+        else "No culinary disasters flagged; order left to proportion quality."
+    )
     return {
-        "winner_id": winner_id,
-        "ranking": [r for r in (data.get("ranking") or []) if r in known_ids],
-        "verdicts": data.get("verdicts") or {},
-        "rationale": data.get("rationale"),
-        "holistic_0_10": data.get("holistic_0_10"),
+        "flags": flags,
+        "weird_candidate_ids": weird_ids,
+        "rationale": rationale,
         "comparison": cards,
-        "winner_entry": by_id.get(winner_id),
         "_llm_trace": {
             "mode": "openai",
             "model": model,
