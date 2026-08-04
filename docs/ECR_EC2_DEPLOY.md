@@ -77,7 +77,11 @@ Same idea as CI; CI is the normal path on `deployment`.
 - **Playground `/playground`:** developer flow-graph UI (`static/index.html`)
 - Health: `GET /health`
 - Runtime deps only (`uv sync --frozen --no-dev`) — no notebook/pipeline/mvp extras
-- FoodOn caches baked in: `foodon_web/cache/{foodon_index,foodon_hierarchy,fdc_foodon_map}.json`
+- **Caches in the image:**
+  - FoodOn: `foodon_web/cache/{foodon_index,foodon_hierarchy,fdc_foodon_map}.json`
+  - Dequant FDC grounding: `data/dequant_norm_llm_cache.json` (`DEQUANT_CACHE_PATH`)
+- **Caches in Supabase (not baked into the image):**
+  - Neighborhood Jaccard: `recipe.canonical_neighborhood_cache` — must match agent `NEIGHBORHOOD_CACHE_VERSION` (currently **2**). Populate with `scripts/populate_neighborhood_cache.py` / `precompute_canonical_neighborhoods.py` if lookups miss and rebuild live.
 - Secrets are **not** baked in — supplied at runtime via `/opt/capstone/.env` on EC2
 - Default `RECIPE_DATA_SOURCE=db` (Supabase) inside the container
 

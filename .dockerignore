@@ -30,10 +30,15 @@ mvp_web/cache/
 mvp_agent/
 mvp_web/
 
-# Keep MacroIQ run-log schema available to the image (Dockerfile COPY).
+# Keep MacroIQ SQL schemas available to the image (Dockerfile COPY).
 sql/
 !sql/
+!sql/42_create_canonical_neighborhood_cache.sql
 !sql/43_create_macroiq_runs.sql
+
+# Allow the dequant FDC grounding cache into the build context (gitignore uses Data/).
+!data/
+!data/dequant_norm_llm_cache.json
 
 *.csv
 *.txt

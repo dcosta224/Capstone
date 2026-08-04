@@ -4,6 +4,12 @@
 #
 # UI: recipe_opt_web serves MacroIQ at `/` (static/macroiq.html + .css/.js).
 # Developer playground remains at `/playground` (static/index.html).
+#
+# Runtime caches baked into the image:
+#   - foodon_web/cache/{foodon_index,foodon_hierarchy,fdc_foodon_map}.json
+#   - data/dequant_norm_llm_cache.json  (FDC grounding dequant lookups)
+# Neighborhood Jaccard cache is NOT in the image — it lives in Supabase
+# (recipe.canonical_neighborhood_cache, cache_version matching the agent).
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 
@@ -23,8 +29,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY recipe_opt_agent/ recipe_opt_agent/
 # Includes MacroIQ product UI (static/macroiq.*) and playground (static/index.html).
 COPY recipe_opt_web/ recipe_opt_web/
-# Optional schema bootstrap for MacroIQ run logging (mvp_logs.macroiq_runs).
+# Dequant-cache lookup package used by grounding (DraftDequantCache).
+COPY eval_fdc_grounding_ui/__init__.py eval_fdc_grounding_ui/__init__.py
+COPY eval_fdc_grounding_ui/draft_cache.py eval_fdc_grounding_ui/draft_cache.py
+# Schema bootstrap for neighborhood + MacroIQ run logging.
 RUN mkdir -p sql
+COPY sql/42_create_canonical_neighborhood_cache.sql sql/42_create_canonical_neighborhood_cache.sql
 COPY sql/43_create_macroiq_runs.sql sql/43_create_macroiq_runs.sql
 # Agent runtime modules under scripts/ (PYTHONPATH). Avoid shipping the whole
 # scripts tree so pipeline/notebook helpers stay out of the image.
@@ -44,11 +54,27 @@ COPY scripts/db.py \
      scripts/augmentation_retrieve.py \
      scripts/foodon_index.py \
      scripts/foodon_hierarchy_cache.py \
+     scripts/portion_gram.py \
+     scripts/amount_kind.py \
+     scripts/unit_convert.py \
+     scripts/unit_aliases.py \
+     scripts/usda_volume_units.py \
+     scripts/recipe_parse_rules.py \
+     scripts/resolution_plan.py \
+     scripts/parse_recipe_ingredient.py \
+     scripts/build_dequant_norm_cache.py \
+     scripts/dequant_volume_anchor.py \
+     scripts/ingredient_query_cache.py \
+     scripts/ingredient_match_staged.py \
+     scripts/resolved_recipe_portion.py \
+     scripts/load_food_4macro.py \
+     scripts/progress_utils.py \
      scripts/
-RUN mkdir -p foodon_web/cache
+RUN mkdir -p foodon_web/cache data
 COPY foodon_web/cache/foodon_index.json foodon_web/cache/foodon_index.json
 COPY foodon_web/cache/foodon_hierarchy.json foodon_web/cache/foodon_hierarchy.json
 COPY foodon_web/cache/fdc_foodon_map.json foodon_web/cache/fdc_foodon_map.json
+COPY data/dequant_norm_llm_cache.json data/dequant_norm_llm_cache.json
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
@@ -69,7 +95,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     HF_HOME=/app/.cache/huggingface \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/scripts:/app \
-    RECIPE_DATA_SOURCE=db
+    RECIPE_DATA_SOURCE=db \
+    DEQUANT_CACHE_PATH=/app/data/dequant_norm_llm_cache.json
 
 COPY --from=builder /app /app
 
