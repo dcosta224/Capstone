@@ -593,7 +593,7 @@ def run(req: RunRequest):
                             "phase": "creative_start",
                             "message": (
                                 "Creative mode: loading neighborhood context "
-                                "(Jaccard cache preferred when canonical selected)…"
+                                "(start recipe uses nutrition proximity when a family is selected)…"
                             ),
                             "user_request": req.user_request,
                         },
@@ -608,7 +608,7 @@ def run(req: RunRequest):
                         fat_min=fat_min,
                         fat_max=fat_max,
                         offline=req.canonical_id is None,
-                        # Prefer Jaccard cache; rebuild live on miss so Optimize still runs.
+                        # FoodOn cache is only for the neighbor set; start pick is L1 PFC.
                         require_cache=False,
                     )
                     problem = _apply_kcal_target(problem, req.kcal_target)
@@ -619,10 +619,10 @@ def run(req: RunRequest):
                         nb_note = " · offline stub (no dish selected; neighborhood cache N/A)"
                         nb_flag = None
                     elif cache_hit:
-                        nb_note = " · neighborhood from Jaccard cache"
+                        nb_note = " · neighborhood set from FoodOn cache"
                         nb_flag = True
                     else:
-                        nb_note = " · neighborhood rebuilt live (Jaccard cache miss)"
+                        nb_note = " · neighborhood set rebuilt live"
                         nb_flag = False
                     emit(
                         "load",
@@ -676,8 +676,8 @@ def run(req: RunRequest):
                         "type": "load",
                         "phase": "build_neighborhood",
                         "message": (
-                            f"Loading matched recipes + FoodOn rollups for canonical_id={req.canonical_id} "
-                            f"(prefer Jaccard cache; start_metric={req.start_metric})…"
+                            f"Loading FoodOn neighborhood for canonical_id={req.canonical_id} "
+                            f"(start recipe = nutrition proximity / {req.start_metric or 'l1_pfc'})…"
                         ),
                         "canonical_id": req.canonical_id,
                         "start_metric": req.start_metric,
@@ -691,10 +691,12 @@ def run(req: RunRequest):
                     carb_max=carb_max,
                     fat_min=fat_min,
                     fat_max=fat_max,
+                    # Always pick the starting NLG recipe by nutrition proximity
+                    # (L1 PFC to the macro box), not by FoodOn Jaccard hit-count.
                     prefer_nutrition_start=True,
                     start_metric=req.start_metric or "l1_pfc",
                     fast_neighborhood=True,
-                    # Prefer Jaccard cache; rebuild live on miss so Optimize still runs.
+                    # FoodOn Jaccard cache is only for the neighbor *set*; rebuild on miss.
                     require_cache=False,
                 )
                 problem = _apply_kcal_target(problem, req.kcal_target)
@@ -702,13 +704,17 @@ def run(req: RunRequest):
                 taste_text = (req.taste_text or req.user_request or "").strip() or problem.get("taste_text") or title
                 chosen = problem.get("chosen_recipe") or {}
                 sel = (chosen.get("selection") or {}) if isinstance(chosen, dict) else {}
-                metric_note = sel.get("method") or req.start_metric
+                metric_note = sel.get("method") or sel.get("selection_mode") or req.start_metric
                 fallback = sel.get("fallback_reason")
                 from_cache = bool(
                     problem.get("neighborhood_from_cache")
                     or sel.get("neighborhood_from_cache")
                 )
-                cache_note = "Jaccard cache hit" if from_cache else "live neighborhood rebuild"
+                cache_note = (
+                    "neighborhood set from FoodOn cache"
+                    if from_cache
+                    else "neighborhood set rebuilt live"
+                )
                 macro_note = (
                     " · macro targets on"
                     if use_macros
@@ -725,8 +731,8 @@ def run(req: RunRequest):
                         "type": "load",
                         "phase": "selected_start",
                         "message": (
-                            f"Selected starting NLG recipe {chosen.get('recipe_nlg_id')} "
-                            f"via {metric_note}"
+                            f"Selected starting recipe {chosen.get('recipe_nlg_id')} "
+                            f"by nutrition proximity ({metric_note})"
                             + (f" (fallback: {fallback})" if fallback else "")
                             + f" · {cache_note}{macro_note}{kcal_note} · "
                             f"{len(chosen.get('ingredients') or [])} ingredients · "

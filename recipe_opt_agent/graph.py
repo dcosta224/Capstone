@@ -3109,10 +3109,12 @@ FLOW_NODE_DOCS: dict[str, dict[str, Any]] = {
         "tools": [
             {
                 "name": "select_canonical_recipe",
-                "purpose": "Bind dropdown selection + FoodOn neighborhood (Jaccard cache when available)",
+                "purpose": "Bind dropdown selection + FoodOn neighborhood; pick start by nutrition",
                 "detail": (
-                    "Loads the selected canonical dish, builds or restores its FoodOn Jaccard neighborhood, "
-                    "and picks the starting NLG recipe by L1 PFC (or loss projection). No LLM."
+                    "Loads the selected canonical dish and its FoodOn co-occurrence neighborhood "
+                    "(Jaccard cache for the neighbor *set* only). The starting NLG recipe inside "
+                    "that neighborhood is chosen by nutrition proximity: L1 PFC to the macro box "
+                    "(or loss projection). No LLM."
                 ),
             },
         ],
