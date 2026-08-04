@@ -68,6 +68,8 @@ def _initial_state(
             "ideation_model": config.ideation_model,
             "marginal_add_delta_eps": config.marginal_add_delta_eps,
             "max_total_adds": config.max_total_adds,
+            "bundle_proxy_cap": config.bundle_proxy_cap,
+            "bundle_lp_cap": config.bundle_lp_cap,
         },
         "problem": problem,
         "candidate_pool": [],

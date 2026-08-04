@@ -421,9 +421,9 @@ def ground_draft_to_problem(
     # so curated FDC judgments are used before catalog / synthetic fallbacks.
     if cache is None and use_dequant_cache:
         try:
-            from eval_fdc_grounding_ui.draft_cache import DraftDequantCache
+            from eval_fdc_grounding_ui.draft_cache import get_shared_dequant_cache
 
-            cache = DraftDequantCache()
+            cache = get_shared_dequant_cache()
         except Exception as exc:
             cache = None
             dequant_load_error = str(exc)

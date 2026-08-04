@@ -15,6 +15,8 @@ ExecStart=/usr/bin/docker run --name capstone-mvp --rm \
   --env-file /opt/capstone/.env \
   -e PYTHONPATH=/app/scripts:/app \
   -e RECIPE_DATA_SOURCE=db \
+  -e MACROIQ_FAST_DEMO=1 \
+  -e MACROIQ_SAVE_NEIGHBORHOOD_CACHE=1 \
   ${ECR_IMAGE_URI}
 ExecStop=-/usr/bin/docker stop capstone-mvp
 Restart=on-failure

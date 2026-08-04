@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 
 
 # Identity templates: canonical title substrings → identity roles that cannot be emptied.
@@ -12,6 +13,27 @@ IDENTITY_TEMPLATES: dict[str, list[str]] = {
     "pizza": ["crust"],
     "margherita": ["cheese", "tomato", "crust"],
 }
+
+
+def fast_demo_from_env() -> bool:
+    """True when MACROIQ_FAST_DEMO is set (Docker production sets this).
+
+    Cuts LLM round-trips (no shadow GPT-5.5, no judge, cheaper ideation, ≤2 iters)
+    for demo latency on small EC2 hosts.
+    """
+    raw = (os.environ.get("MACROIQ_FAST_DEMO") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def save_neighborhood_cache_from_env() -> bool:
+    """Upsert Jaccard neighborhood cache after a live rebuild (fills misses)."""
+    raw = (os.environ.get("MACROIQ_SAVE_NEIGHBORHOOD_CACHE") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    # Default on whenever fast-demo is enabled.
+    return fast_demo_from_env()
 
 
 @dataclass
@@ -79,6 +101,34 @@ class AgentConfig:
     marginal_add_delta_eps: float = 0.02
     # Max new ingredients per run before add-only bundles are vetoed
     max_total_adds: int = 2
+    # Joint LP bundle caps (propose → score_bundles)
+    bundle_proxy_cap: int = 50
+    bundle_lp_cap: int = 10
+
+    def apply_fast_demo(self) -> AgentConfig:
+        """Latency profile for t3.medium demos: fewer/cheaper LLM calls + lighter LP."""
+        return replace(
+            self,
+            enable_shadow_gpt_candidate=False,
+            enable_llm_judge=False,
+            ideation_model="gpt-4o-mini",
+            model_escalate="gpt-4o-mini",
+            creative_model="gpt-4o-mini",
+            n_ideation_candidates=min(int(self.n_ideation_candidates), 4),
+            max_iterations=min(int(self.max_iterations), 2),
+            max_finalists=min(int(self.max_finalists), 2),
+            min_finalists=min(int(self.min_finalists), 2),
+            bundle_proxy_cap=min(int(self.bundle_proxy_cap), 24),
+            bundle_lp_cap=min(int(self.bundle_lp_cap), 5),
+        )
+
+    @classmethod
+    def for_request(cls, **kwargs) -> AgentConfig:
+        """Build config; apply MACROIQ_FAST_DEMO profile when enabled."""
+        cfg = cls(**kwargs)
+        if fast_demo_from_env():
+            return cfg.apply_fast_demo()
+        return cfg
 
     def target_box_dict(self) -> dict[str, float]:
         return {

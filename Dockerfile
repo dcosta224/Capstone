@@ -96,7 +96,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/scripts:/app \
     RECIPE_DATA_SOURCE=db \
-    DEQUANT_CACHE_PATH=/app/data/dequant_norm_llm_cache.json
+    DEQUANT_CACHE_PATH=/app/data/dequant_norm_llm_cache.json \
+    MACROIQ_FAST_DEMO=1 \
+    MACROIQ_SAVE_NEIGHBORHOOD_CACHE=1
 
 COPY --from=builder /app /app
 

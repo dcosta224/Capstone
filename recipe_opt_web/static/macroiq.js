@@ -1,6 +1,7 @@
 /* MacroIQ product UI — compose + simplified live progress */
 
-const MAX_LOOP_ROUNDS = 3;
+// Fast-demo production profile caps the diagnose→propose→apply loop at 2.
+const MAX_LOOP_ROUNDS = 2;
 // Rough graph budget for remaining-step estimates (diagnose→propose→decide→apply).
 const STEPS_PER_LOOP_ROUND = 4;
 const WRAP_UP_STEPS = 3;

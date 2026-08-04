@@ -25,7 +25,7 @@ try:
 except Exception:
     pass
 
-from recipe_opt_agent.config import AgentConfig
+from recipe_opt_agent.config import AgentConfig, fast_demo_from_env
 from recipe_opt_agent.creative_loader import load_creative_problem
 from recipe_opt_agent.graph import (
     CREATIVE_FLOW_EDGES,
@@ -42,6 +42,7 @@ from recipe_opt_agent.problem_loader import (
     search_canonical_dishes,
 )
 from recipe_opt_agent.runner import run_recipe_opt_agent
+from recipe_opt_agent.runtime_warm import warm_runtime_caches, warm_status
 
 app = FastAPI(title="MacroIQ", version="0.2.0")
 
@@ -51,21 +52,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.on_event("startup")
 def _warm_foodon_caches() -> None:
-    """Load FoodOn index/hierarchy + MiniLM once so first request isn't cold."""
-    try:
-        from canonical_optimization import _get_hierarchy, _get_index
-
-        _get_index()
-        _get_hierarchy()
-    except Exception:
-        # DB / cache missing is fine — first live run will surface the error.
-        pass
-    try:
-        from recipe_opt_agent.embedding_model import warm_embedding_model
-
-        warm_embedding_model()
-    except Exception:
-        pass
+    """Load FoodOn + MiniLM + dequant once so first request isn't cold."""
+    warm_runtime_caches()
 
 
 SSE_HEADERS = {
@@ -103,7 +91,11 @@ class RunRequest(BaseModel):
     fat_max: float = Field(default=0.445, ge=0, le=1)
     F_accept: float = Field(default=1.0, gt=0)
     F_max: float = Field(default=1.5, gt=0)
-    max_iterations: int = Field(default=3, ge=1, le=10)
+    max_iterations: int = Field(
+        default=2 if fast_demo_from_env() else 3,
+        ge=1,
+        le=10,
+    )
 
 
 def _apply_kcal_target(problem: dict, kcal_target: float | None) -> dict:
@@ -166,6 +158,8 @@ def health():
     return {
         "status": "ok",
         "has_openai_key": bool(os.environ.get("OPENAI_API_KEY")),
+        "fast_demo": fast_demo_from_env(),
+        "warm": warm_status(),
         "flow_nodes": list(FLOW_NODES),
         "mode": "live_canonical_end_to_end",
     }
@@ -517,7 +511,7 @@ def run(req: RunRequest):
         carb_min, carb_max = 0.0, 1.0
         fat_min, fat_max = 0.0, 1.0
         nutrition_slack_weight = 0.0
-    cfg = AgentConfig(
+    cfg = AgentConfig.for_request(
         protein_min=protein_min,
         protein_max=protein_max,
         carb_min=carb_min,

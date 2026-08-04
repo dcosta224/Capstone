@@ -889,7 +889,13 @@ def node_propose(state: AgentState) -> dict[str, Any]:
     bundle_error = None
     if flat_candidates:
         try:
-            bundles = score_bundles(problem, per_slot, box_dict=box_dict)
+            bundles = score_bundles(
+                problem,
+                per_slot,
+                box_dict=box_dict,
+                proxy_cap=int(getattr(cfg, "bundle_proxy_cap", 50) or 50),
+                lp_cap=int(getattr(cfg, "bundle_lp_cap", 10) or 10),
+            )
         except Exception as exc:
             bundle_error = str(exc)
             bundles = []

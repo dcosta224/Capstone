@@ -240,6 +240,27 @@ class DraftCacheHit:
         }
 
 
+_SHARED_DEQUANT: "DraftDequantCache | None" = None
+
+
+def get_shared_dequant_cache(cache_path: Path | str | None = None) -> "DraftDequantCache":
+    """Process-wide dequant cache (load JSON once; reuse across grounding calls)."""
+    global _SHARED_DEQUANT
+    if _SHARED_DEQUANT is None:
+        _SHARED_DEQUANT = DraftDequantCache(cache_path)
+    return _SHARED_DEQUANT
+
+
+def warm_dequant_cache(cache_path: Path | str | None = None) -> dict[str, Any]:
+    """Eager-load dequant entries for server startup."""
+    cache = get_shared_dequant_cache(cache_path)
+    return {
+        "ok": True,
+        "n_entries": len(cache.entries),
+        "path": str(cache.cache_path),
+    }
+
+
 class DraftDequantCache:
     """Lookup + write helpers for draft-ingredient cache hits."""
 

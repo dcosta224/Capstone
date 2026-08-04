@@ -1055,10 +1055,13 @@ def load_canonical_problem(
         neighborhood_ratio_samples,
     )
 
+    from recipe_opt_agent.config import save_neighborhood_cache_from_env
+
     nb = CanonicalNeighborhood.build(
         canonical_id,
         fast=fast_neighborhood,
         use_cache=True,
+        save_cache=save_neighborhood_cache_from_env(),
         require_cache=require_cache,
     )
     selection_meta: dict[str, Any] = {
